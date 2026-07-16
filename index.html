@@ -360,6 +360,18 @@
     }
     .preview-effect-name { font-size: .88rem; font-weight: 700; }
     .preview-hint { font-size: .72rem; color: var(--muted); }
+    .preview-disclaimer {
+      width: 100%;
+      margin-top: .4rem;
+      font-size: .68rem;
+      line-height: 1.45;
+      color: var(--muted);
+      opacity: .85;
+      text-align: center;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
+    }
 
     /* ── Orientation toggle ──────────────────────────────────── */
     .orient-bar {
@@ -1542,6 +1554,9 @@ function buildPreviewPanel(demoMode) {
       </div>
 
       <div class="preview-controls" id="previewControls"></div>
+      <div class="preview-disclaimer">This preview is a demonstration only. It is not a true
+        representation of the finished product: real lenticular prints are sharper, with
+        smoother motion and true depth that no screen can reproduce.</div>
     </div>`;
 
   /* Demo mode shows the shimmer placeholder; effect mode sets its own
@@ -1885,9 +1900,11 @@ function renderFlip(cc) {
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre). */
-    const lensT = 1 / (1 + Math.exp(-7 * tilt));   /* 0 at −tilt, 1 at +tilt */
-    if (!paused) op += (lensT - op) * 0.5;          /* light de-jitter */
+    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre).
+       Steepness 3.5 (was 7) + slower follow 0.22 (was 0.5): user 2026-07-04
+       wanted a visibly smoother flip — the old values snapped A→B too hard. */
+    const lensT = 1 / (1 + Math.exp(-3.5 * tilt)); /* 0 at −tilt, 1 at +tilt */
+    if (!paused) op += (lensT - op) * 0.22;         /* smooth follow */
     op = op < 0 ? 0 : op > 1 ? 1 : op;
 
     /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
