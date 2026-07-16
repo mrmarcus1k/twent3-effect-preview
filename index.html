@@ -1,0 +1,3571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- Never let the browser hold a stale build: this app is edited live and
+       served from a local http.server that does not send cache headers, so
+       browsers heuristic-cache the HTML and show old code after edits. -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TwenT3 — Product Preview Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
+  <!-- ag-psd: PSD layer parser for Layered 3D / Animation effects.
+       LOCAL copy (fixed 2026-07-02): the old CDN URL pointed at a file that
+       does not exist in the package (dist/ag-psd.min.js), so AgPsd was
+       undefined and every PSD upload failed with the "library is loading"
+       alert. Local bundle = ag-psd@27 dist/bundle.js, global `agPsd`.      -->
+  <script src="ag-psd.min.js"></script>
+  <script>window.AgPsd = window.AgPsd || window.agPsd;</script>
+  <!-- face-api.js: 68-point facial landmark detection for morph alignment -->
+  <script src="face-api.js"></script>
+  <!-- JSZip: read ZIP archives (for frame-sequence ZIP upload) -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:      #52bf90;
+      --green-dark: #3a9d73;
+      --green-a10:  rgba(82,191,144,.10);
+      --green-a20:  rgba(82,191,144,.20);
+      --dark:       #0d1117;
+      --dark-2:     #161b22;
+      --dark-3:     #21262d;
+      --dark-4:     #30363d;
+      --text:       #e6edf3;
+      --muted:      #8b949e;
+    }
+
+    body {
+      background: var(--dark);
+      color: var(--text);
+      font-family: 'Open Sans', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── Header ─────────────────────────────────────────────── */
+    .header {
+      background: var(--dark-2);
+      border-bottom: 1px solid var(--dark-4);
+      padding: .85rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      position: sticky;
+      top: 0;
+      z-index: 200;
+    }
+    .header-logo { font-size: 1.4rem; font-weight: 800; color: var(--green); letter-spacing: -.5px; }
+    .header-sep  { color: var(--dark-4); }
+    .header-sub  { font-size: .8rem; color: var(--muted); }
+    .header-badge {
+      margin-left: auto;
+      background: var(--green-a10);
+      border: 1px solid var(--green-a20);
+      color: var(--green);
+      font-size: .68rem;
+      font-weight: 700;
+      padding: .22rem .6rem;
+      border-radius: 999px;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+    }
+
+    /* ─── Layout ──────────────────────────────────────────────── */
+    .main {
+      display: grid;
+      grid-template-columns: 370px 1fr;
+      min-height: calc(100vh - 58px);
+    }
+
+    /* ─── Upload Panel ────────────────────────────────────────── */
+    .upload-panel {
+      border-right: 1px solid var(--dark-4);
+      padding: 1.4rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      overflow-y: auto;
+    }
+    .section-label {
+      font-size: .68rem; font-weight: 700;
+      letter-spacing: 1px; text-transform: uppercase; color: var(--muted);
+    }
+
+    /* ─── Effect Selector Grid ────────────────────────────────── */
+    .effect-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: .45rem;
+    }
+    .effect-btn {
+      background: var(--dark-3);
+      border: 1.5px solid var(--dark-4);
+      border-radius: .65rem;
+      padding: .65rem .35rem .55rem;
+      text-align: center;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: .7rem;
+      font-weight: 600;
+      color: var(--muted);
+      transition: all .18s;
+      line-height: 1.3;
+    }
+    .effect-btn:hover  { border-color: var(--green); color: var(--text); background: var(--dark-4); }
+    .effect-btn.active { background: var(--green-a10); border-color: var(--green); color: var(--green); }
+    .effect-btn .btn-icon { display: block; font-size: 1.3rem; margin-bottom: .3rem; }
+
+    .effect-headline { font-size: 1.15rem; font-weight: 800; }
+    .effect-desc     { font-size: .81rem; color: var(--muted); line-height: 1.65; }
+
+    .upload-zone-title { font-size: .74rem; font-weight: 700; color: var(--green); margin-bottom: .4rem; }
+    .upload-zone {
+      position: relative;
+      border: 2px dashed var(--dark-4);
+      border-radius: .85rem;
+      padding: 1.4rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      background: var(--dark-3);
+      margin-bottom: .6rem;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--green);
+      background: var(--green-a10);
+    }
+    .upload-zone input {
+      position: absolute; inset: 0;
+      opacity: 0; cursor: pointer;
+      width: 100%; height: 100%;
+    }
+    .upload-icon       { font-size: 1.8rem; margin-bottom: .4rem; }
+    .upload-label-text { font-size: .82rem; color: var(--muted); }
+    .upload-label-text strong { color: var(--green); }
+    .upload-hint   { font-size: .7rem; color: var(--muted); opacity: .6; margin-top: .25rem; }
+    .psd-badge {
+      display: inline-block;
+      background: rgba(82,191,144,.15);
+      border: 1px solid var(--green-a20);
+      color: var(--green);
+      font-size: .62rem; font-weight: 700;
+      padding: .1rem .4rem;
+      border-radius: 4px;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      margin-top: .3rem;
+    }
+
+    .thumb-row { display: flex; gap: .65rem; flex-wrap: wrap; }
+    .thumb {
+      width: 64px; height: 64px;
+      border-radius: .45rem; overflow: hidden;
+      border: 2px solid var(--green);
+      position: relative; flex-shrink: 0;
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .thumb .rm {
+      position: absolute; top: 2px; right: 2px;
+      background: rgba(0,0,0,.75);
+      border: none; color: #fff;
+      width: 16px; height: 16px;
+      border-radius: 50%; font-size: 9px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .info-card {
+      background: var(--dark-3);
+      border: 1px solid var(--dark-4);
+      border-radius: .85rem;
+      padding: .9rem 1rem;
+    }
+    .info-card-title {
+      font-size: .76rem; font-weight: 700; color: var(--green);
+      display: flex; align-items: center; gap: .35rem; margin-bottom: .4rem;
+    }
+    .step { display: flex; align-items: flex-start; gap: .65rem; margin-bottom: .4rem; font-size: .76rem; color: var(--muted); }
+    .step-num {
+      flex-shrink: 0; width: 19px; height: 19px;
+      border-radius: 50%; background: var(--dark-4);
+      color: var(--green); font-size: .68rem; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .tip-box {
+      border-left: 3px solid var(--green);
+      background: var(--dark-3);
+      border-radius: 0 .7rem .7rem 0;
+      padding: .7rem .9rem;
+      font-size: .75rem; color: var(--muted); line-height: 1.6;
+    }
+    .tip-box strong { color: var(--green); display: block; margin-bottom: .2rem; }
+    .btn-generate {
+      width: 100%; padding: .85rem;
+      background: var(--green); color: #fff; border: none;
+      border-radius: .85rem; font-family: inherit;
+      font-size: .92rem; font-weight: 700; cursor: pointer;
+      transition: background .2s, transform .15s, opacity .2s;
+      display: flex; align-items: center; justify-content: center; gap: .5rem;
+    }
+    .btn-generate:hover    { background: var(--green-dark); transform: translateY(-1px); }
+    .btn-generate:disabled { opacity: .35; cursor: not-allowed; transform: none; }
+
+    /* ─── Preview Panel ───────────────────────────────────────── */
+    .preview-panel {
+      display: flex;
+      flex-direction: column;
+      background: #0a0e14;
+      overflow: hidden;
+    }
+
+    /* ─── Hand Scene ──────────────────────────────────────────── */
+    .hand-scene {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      min-height: 400px;
+    }
+    .scene-bg {
+      position: absolute; inset: 0; z-index: 0;
+      background:
+        radial-gradient(ellipse at 50% 0%, rgba(120,160,200,.18) 0%, transparent 55%),
+        linear-gradient(175deg, #1e2d3d 0%, #0e1820 40%, #070c12 100%);
+    }
+    .scene-bg::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0; height: 35%;
+      background: linear-gradient(to top, rgba(82,191,144,.025), transparent);
+    }
+
+    /* ── Card content area (behind canvas, z:1) ─────────────── */
+    #cardArea {
+      position: absolute; z-index: 1;
+      overflow: hidden; border-radius: 8px;
+    }
+    #cardContent {
+      width: 100%; height: 100%;
+      position: relative; overflow: hidden;
+    }
+
+    /* ── Hand video (hidden, feeds canvas) ──────────────────── */
+    #handVideo {
+      position: absolute; opacity: 0; pointer-events: none;
+      top: 0; left: 0; width: 1px; height: 1px;
+    }
+
+    /* ── Canvas — chroma-keyed hands (z:2) ──────────────────── */
+    #handCanvas {
+      position: absolute; inset: 0; z-index: 2;
+      width: 100%; height: 100%; display: block;
+    }
+
+    /* ── Demo shimmer ────────────────────────────────────────── */
+    @keyframes demoGrad {
+      0%   { background-position: 0% 50%; }
+      50%  { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    .demo-card-face {
+      width: 100%; height: 100%;
+      background: linear-gradient(135deg, #1a3a2a, #0d2018, #52bf90, #0d2018, #1a3a2a);
+      background-size: 300% 300%;
+      animation: demoGrad 4s ease infinite;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .demo-card-face span {
+      font-size: .6rem; font-weight: 700;
+      color: rgba(255,255,255,.3);
+      letter-spacing: 2px; text-transform: uppercase;
+    }
+
+    /* ─── Card tilt — LEFT-RIGHT (rotateY, card_02_03.mp4) ───── */
+    :root { --tilt-dur: 3s; }
+    @keyframes cardTiltLR {
+      0%        { transform: rotateY(-12deg); }
+      20%       { transform: rotateY(-4deg);  }
+      40%, 60%  { transform: rotateY(10deg);  }
+      80%       { transform: rotateY(3deg);   }
+      100%      { transform: rotateY(-12deg); }
+    }
+    .card-tilting {
+      animation: cardTiltLR var(--tilt-dur) ease-in-out infinite;
+      transform-origin: center center;
+      transform-style: preserve-3d;
+    }
+
+    /* ─── Card tilt — UP-DOWN (rotateX, card_01_03.mp4) ──────── */
+    @keyframes cardTiltUD {
+      0%        { transform: rotateX(8deg);  }
+      20%       { transform: rotateX(2deg);  }
+      40%, 60%  { transform: rotateX(-7deg); }
+      80%       { transform: rotateX(-1deg); }
+      100%      { transform: rotateX(8deg);  }
+    }
+    .card-tilting-ud {
+      animation: cardTiltUD var(--tilt-dur) ease-in-out infinite;
+      transform-origin: center center;
+      transform-style: preserve-3d;
+    }
+
+    /* ─── 2 Image Flip — canvas-driven lenticular stripe render ─
+       renderFlip() uses a canvas + requestAnimationFrame loop.
+       Tilt angle AND lenticular stripe progress are both derived
+       from handVideoEl.currentTime so hand, tilt, and image
+       transition are one perfectly synced continuous movement.
+       No CSS animation needed for this effect.                   */
+
+    /* ─── 3D Parallax ────────────────────────────────────────── */
+    .threed-wrap {
+      position:relative; width:100%; height:100%;
+      transform-style:preserve-3d;
+    }
+    .threed-layer { position:absolute; inset:0; }
+    .threed-layer img { width:100%; height:100%; object-fit:cover; display:block; }
+
+    /* ─── Layered 3D depth planes ────────────────────────────── */
+    .layer-plane { position:absolute; inset:0; transition: transform .08s ease-out; }
+    .layer-plane img,
+    .layer-plane canvas { width:100%; height:100%; object-fit:cover; display:block; }
+
+    /* ─── Animation frames ───────────────────────────────────── */
+    .anim-frame { position:absolute; inset:0; opacity:0; transition: opacity .12s ease; }
+    .anim-frame.active { opacity:1; }
+    .anim-frame img,
+    .anim-frame canvas { width:100%; height:100%; object-fit:cover; display:block; }
+
+    /* ─── Zoom ───────────────────────────────────────────────── */
+    @keyframes zoomPulse {
+      0%,100% { transform: scale(1); }
+      50%     { transform: scale(1.45); }
+    }
+    .zoom-img {
+      width:100%; height:100%; object-fit:cover; display:block;
+      animation: zoomPulse var(--tilt-dur) ease-in-out infinite;
+    }
+
+    /* ─── Preview footer ──────────────────────────────────────── */
+    .preview-footer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .5rem;
+      padding: .75rem 1.5rem .85rem;
+      background: var(--dark-2);
+      border-top: 1px solid var(--dark-4);
+      z-index: 10;
+    }
+    .preview-effect-name { font-size: .88rem; font-weight: 700; }
+    .preview-hint { font-size: .72rem; color: var(--muted); }
+
+    /* ── Orientation toggle ──────────────────────────────────── */
+    .orient-bar {
+      display: flex;
+      gap: .35rem;
+      background: var(--dark-3);
+      border: 1px solid var(--dark-4);
+      border-radius: .65rem;
+      padding: .25rem;
+    }
+    .orient-btn {
+      background: none;
+      border: none;
+      border-radius: .45rem;
+      padding: .32rem .75rem;
+      font-family: inherit;
+      font-size: .72rem;
+      font-weight: 700;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: .3rem;
+      transition: all .18s;
+      white-space: nowrap;
+    }
+    .orient-btn:hover { color: var(--text); }
+    .orient-btn.active {
+      background: var(--green);
+      color: #fff;
+    }
+
+    /* ── Preview controls ────────────────────────────────────── */
+    .preview-controls {
+      display: flex; gap: .55rem; flex-wrap: wrap; justify-content: center;
+    }
+    .btn-ctrl {
+      background: var(--dark-3); color: var(--muted);
+      border: 1px solid var(--dark-4);
+      border-radius: .6rem; padding: .42rem .9rem;
+      font-size: .73rem; font-weight: 600; cursor: pointer;
+      font-family: inherit;
+      display: flex; align-items: center; gap: .3rem;
+      transition: all .18s;
+    }
+    .btn-ctrl:hover  { border-color: var(--green); color: var(--green); }
+    .btn-ctrl.active { background: var(--green); color: #fff; border-color: var(--green); }
+
+    /* Spinner */
+    .spinner {
+      width:28px; height:28px;
+      border:3px solid var(--dark-4);
+      border-top-color: var(--green);
+      border-radius:50%;
+      animation: spin .8s linear infinite;
+      position: absolute; top:50%; left:50%;
+      transform: translate(-50%,-50%);
+    }
+    @keyframes spin { to { transform: translate(-50%,-50%) rotate(360deg); } }
+
+    /* ─── Depth Map Section ───────────────────────────────────── */
+    .depth-section {
+      border-top: 1px solid var(--dark-4);
+      padding-top: .85rem;
+      display: flex; flex-direction: column; gap: .55rem;
+    }
+    .depth-drop-zone {
+      border: 1.5px dashed var(--dark-4);
+      border-radius: .65rem;
+      padding: .65rem .75rem;
+      display: flex; align-items: center; gap: .65rem;
+      cursor: pointer;
+      background: var(--dark-3);
+      transition: border-color .18s;
+    }
+    .depth-drop-zone:hover, .depth-drop-zone.drag-over {
+      border-color: var(--green); background: var(--green-a10);
+    }
+    .depth-drop-zone.has-map { border-color: var(--green); }
+    .depth-drop-icon { font-size: 1.2rem; }
+    .depth-drop-text { font-size: .72rem; color: var(--muted); line-height: 1.3; }
+    .depth-drop-text strong { color: var(--text); }
+    .depth-map-thumb {
+      width: 56px; height: 32px; object-fit: cover;
+      border-radius: 4px; border: 1px solid var(--dark-4); flex-shrink: 0;
+    }
+    .depth-api-row {
+      display: flex; gap: .45rem; align-items: stretch;
+    }
+    .depth-api-row .btn-depth-gen { flex: 1; }
+    .depth-api-key {
+      flex: 1; background: var(--dark-3);
+      border: 1.5px solid var(--dark-4); border-radius: .55rem;
+      color: var(--text); font-size: .72rem; padding: .42rem .65rem;
+      font-family: inherit; outline: none;
+    }
+    .depth-api-key:focus { border-color: var(--green); }
+    .depth-api-key::placeholder { color: var(--muted); }
+    .btn-depth-gen {
+      background: var(--green-a10); border: 1.5px solid var(--green-a20);
+      color: var(--green); border-radius: .55rem;
+      padding: .42rem .75rem; font-size: .72rem; font-weight: 700;
+      cursor: pointer; font-family: inherit; white-space: nowrap;
+      transition: all .18s;
+    }
+    .btn-depth-gen:hover { background: var(--green); color: #fff; border-color: var(--green); }
+    .btn-depth-gen:disabled { opacity: .45; cursor: not-allowed; }
+    .depth-status { font-size: .68rem; color: var(--muted); text-align: center; }
+    .depth-status.ok { color: var(--green); }
+    .depth-status.err { color: #f85149; }
+
+    /* ─── Frame Sequence Drop Zone ────────────────────────────── */
+    .seq-drop {
+      border: 2px dashed var(--dark-4);
+      border-radius: .85rem;
+      padding: 1.8rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all .2s;
+      background: var(--dark-3);
+      position: relative;
+    }
+    .seq-drop:hover, .seq-drop.drag-over {
+      border-color: var(--green);
+      background: var(--green-a10);
+    }
+    .seq-drop.has-frames { border-color: var(--green); border-style: solid; }
+    .seq-drop-icon { font-size: 2rem; display: block; margin-bottom: .45rem; }
+    .seq-drop-title { font-size: .88rem; font-weight: 700; color: var(--text); margin-bottom: .2rem; }
+    .seq-drop-sub { font-size: .72rem; color: var(--muted); line-height: 1.4; }
+    .seq-drop-sub strong { color: var(--green); }
+    .seq-strip {
+      display: flex; gap: 3px; overflow-x: auto; padding: .5rem 0;
+      scrollbar-width: thin; scrollbar-color: var(--dark-4) transparent;
+    }
+    .seq-strip img {
+      height: 36px; width: auto; border-radius: 3px; flex-shrink: 0;
+      border: 1px solid var(--dark-4);
+    }
+    .seq-count {
+      font-size: .7rem; color: var(--green); font-weight: 700;
+      text-align: center; padding: .25rem 0;
+    }
+    .seq-progress-bar {
+      height: 4px; border-radius: 2px;
+      background: var(--dark-4); overflow: hidden; margin-top: .4rem;
+    }
+    .seq-progress-fill {
+      height: 100%; background: var(--green);
+      transition: width .1s linear; width: 0%;
+    }
+
+    /* ─── Responsive ──────────────────────────────────────────── */
+    @media (max-width:860px) {
+      .main { grid-template-columns:1fr; }
+      .upload-panel { border-right:none; border-bottom:1px solid var(--dark-4); }
+    }
+    @media (max-width:540px) {
+      .header-sub { display:none; }
+      .effect-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ─── Header ────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-logo">TwenT3</div>
+  <span class="header-sep">|</span>
+  <span class="header-sub">Product Preview Generator</span>
+  <span class="header-badge">Live Preview</span>
+</header>
+
+<!-- ─── Main ──────────────────────────────────────────────────── -->
+<div class="main">
+  <div class="upload-panel"  id="uploadPanel"></div>
+  <div class="preview-panel" id="previewPanel"></div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   autoimagemorphjs — Adapted from András Jankovics (Public Domain)
+   https://github.com/jankovicsandras/autoimagemorphjs
+
+   Automatic feature detection (highest-contrast pixel per grid
+   cell) + triangle rasterisation morphing — the same approach
+   used by FantaMorph's Face Locator. No user control points needed.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Returns an (m+1)×(n+1) array of [x,y] feature points.
+   Border cells stay at exact grid positions; interior cells use
+   the pixel with the highest sum of edge-contrast differences —
+   automatically finding corners, edges and distinct features.   */
+function aim_getfeaturepoints(imgData, n, m) {
+  var fpts=[], W=imgData.width, H=imgData.height, d=imgData.data;
+  var cw=W/n, ch=H/m;
+  for(var j=0; j<=m; j++) {
+    fpts[j]=[];
+    for(var i=0; i<=n; i++) {
+      fpts[j][i]=[i*cw, j*ch];
+      if(j>0 && j<m && i>0 && i<n) {
+        var fd=H+W, fc=0;
+        for(var y=0; y<ch; y++) {
+          for(var x=0; x<cw; x++) {
+            var px=Math.floor(x+i*cw-cw/2), py=Math.floor(y+j*ch-ch/2);
+            if(px<1||px>=W-1||py<1||py>=H-1) continue;
+            var idx=(W*py+px)*4, tc=0;
+            tc+=Math.abs(d[idx  ]-d[idx+4])+Math.abs(d[idx+1]-d[idx+5])+Math.abs(d[idx+2]-d[idx+6]);
+            tc+=Math.abs(d[idx  ]-d[idx-4])+Math.abs(d[idx+1]-d[idx-3])+Math.abs(d[idx+2]-d[idx-2]);
+            tc+=Math.abs(d[idx  ]-d[idx+W*4])+Math.abs(d[idx+1]-d[idx+W*4+1])+Math.abs(d[idx+2]-d[idx+W*4+2]);
+            tc+=Math.abs(d[idx  ]-d[idx-W*4])+Math.abs(d[idx+1]-d[idx-W*4+1])+Math.abs(d[idx+2]-d[idx-W*4+2]);
+            var dist=Math.hypot(x-cw/2, y-ch/2);
+            if(tc>fc||(tc===fc&&dist<fd)){fpts[j][i]=[px,py];fc=tc;fd=dist;}
+          }
+        }
+      }
+    }
+  }
+  return fpts;
+}
+
+/* Rasterises one morphed triangle into the output pixel buffer.
+   ic1/ic2 = source triangle corners in img1/img2 space.
+   oc      = output triangle corners (interpolated at alfa).
+   alfa    = morph progress 0→1.                               */
+function aim_tridraw(d1, W1, H1, d2, W2, H2, outd, outW, outH, ic1, ic2, oc, alfa) {
+  var x0=oc[0][0], y0=oc[0][1], x1=oc[1][0], y1=oc[1][1], x2=oc[2][0], y2=oc[2][1];
+  var minx=Math.max(0,Math.floor(Math.min(x0,x1,x2)));
+  var maxx=Math.min(outW-1,Math.ceil(Math.max(x0,x1,x2)));
+  var miny=Math.max(0,Math.floor(Math.min(y0,y1,y2)));
+  var maxy=Math.min(outH-1,Math.ceil(Math.max(y0,y1,y2)));
+  var denom=(y1-y2)*(x0-x2)+(x2-x1)*(y0-y2);
+  if(Math.abs(denom)<0.5) return;
+  var inv=1/denom, ia=1-alfa;
+  /* clamp limits prevent bilinear reads going out-of-bounds */
+  var W1m=W1-1.001, H1m=H1-1.001, W2m=W2-1.001, H2m=H2-1.001;
+  for(var py=miny; py<=maxy; py++) {
+    for(var px=minx; px<=maxx; px++) {
+      var l1=((y1-y2)*(px-x2)+(x2-x1)*(py-y2))*inv;
+      var l2=((y2-y0)*(px-x2)+(x0-x2)*(py-y2))*inv;
+      var l3=1-l1-l2;
+      if(l1<-0.001||l2<-0.001||l3<-0.001) continue;
+
+      /* ── Bilinear sample from img1 ───────────────────────── */
+      var sx1=Math.max(0,Math.min(W1m, l1*ic1[0][0]+l2*ic1[1][0]+l3*ic1[2][0]));
+      var sy1=Math.max(0,Math.min(H1m, l1*ic1[0][1]+l2*ic1[1][1]+l3*ic1[2][1]));
+      var bx1=sx1|0, by1=sy1|0, fx1=sx1-bx1, fy1=sy1-by1;
+      var p00=(by1*W1+bx1)*4, p10=p00+4, p01=p00+W1*4, p11=p01+4;
+      var w00=(1-fx1)*(1-fy1), w10=fx1*(1-fy1), w01=(1-fx1)*fy1, w11=fx1*fy1;
+      var r1=d1[p00]*w00+d1[p10]*w10+d1[p01]*w01+d1[p11]*w11;
+      var g1=d1[p00+1]*w00+d1[p10+1]*w10+d1[p01+1]*w01+d1[p11+1]*w11;
+      var b1_=d1[p00+2]*w00+d1[p10+2]*w10+d1[p01+2]*w01+d1[p11+2]*w11;
+
+      /* ── Bilinear sample from img2 ───────────────────────── */
+      var sx2=Math.max(0,Math.min(W2m, l1*ic2[0][0]+l2*ic2[1][0]+l3*ic2[2][0]));
+      var sy2=Math.max(0,Math.min(H2m, l1*ic2[0][1]+l2*ic2[1][1]+l3*ic2[2][1]));
+      var bx2=sx2|0, by2=sy2|0, fx2=sx2-bx2, fy2=sy2-by2;
+      var q00=(by2*W2+bx2)*4, q10=q00+4, q01=q00+W2*4, q11=q01+4;
+      var v00=(1-fx2)*(1-fy2), v10=fx2*(1-fy2), v01=(1-fx2)*fy2, v11=fx2*fy2;
+      var r2=d2[q00]*v00+d2[q10]*v10+d2[q01]*v01+d2[q11]*v11;
+      var g2=d2[q00+1]*v00+d2[q10+1]*v10+d2[q01+1]*v01+d2[q11+1]*v11;
+      var b2_=d2[q00+2]*v00+d2[q10+2]*v10+d2[q01+2]*v01+d2[q11+2]*v11;
+
+      var oi=(py*outW+px)*4;
+      outd[oi  ]=r1*ia+r2*alfa;
+      outd[oi+1]=g1*ia+g2*alfa;
+      outd[oi+2]=b1_*ia+b2_*alfa;
+      outd[oi+3]=255;
+    }
+  }
+}
+
+/* Renders one morph frame at alfa (0=img1 only, 1=img2 only) into outd.
+   fpts1/fpts2 = feature grids from aim_getfeaturepoints (same n,m).
+   The grid is triangulated and each triangle is rasterised via
+   aim_tridraw, warping both source images to the interpolated mesh
+   then cross-dissolving — identical to FantaMorph's algorithm.   */
+function aim_getframe(d1, W1, H1, d2, W2, H2, outd, outW, outH, fpts1, fpts2, alfa) {
+  var m=fpts1.length-1, n=fpts1[0].length-1, ia=1-alfa;
+  for(var j=0; j<m; j++) {
+    for(var i=0; i<n; i++) {
+      var f1=fpts1, f2=fpts2;
+      /* Interpolated output corners for this grid cell */
+      var p00=[f1[j][i][0]*ia+f2[j][i][0]*alfa,         f1[j][i][1]*ia+f2[j][i][1]*alfa];
+      var p01=[f1[j][i+1][0]*ia+f2[j][i+1][0]*alfa,     f1[j][i+1][1]*ia+f2[j][i+1][1]*alfa];
+      var p10=[f1[j+1][i][0]*ia+f2[j+1][i][0]*alfa,     f1[j+1][i][1]*ia+f2[j+1][i][1]*alfa];
+      var p11=[f1[j+1][i+1][0]*ia+f2[j+1][i+1][0]*alfa, f1[j+1][i+1][1]*ia+f2[j+1][i+1][1]*alfa];
+      /* Triangle A — top-left */
+      aim_tridraw(d1,W1,H1, d2,W2,H2, outd,outW,outH,
+        [f1[j][i],f1[j][i+1],f1[j+1][i]], [f2[j][i],f2[j][i+1],f2[j+1][i]],
+        [p00,p01,p10], alfa);
+      /* Triangle B — bottom-right */
+      aim_tridraw(d1,W1,H1, d2,W2,H2, outd,outW,outH,
+        [f1[j][i+1],f1[j+1][i+1],f1[j+1][i]], [f2[j][i+1],f2[j+1][i+1],f2[j+1][i]],
+        [p01,p11,p10], alfa);
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TwenT3 Product Preview — Two-Hands Canvas Compositing
+   ═══════════════════════════════════════════════════════════════
+
+   Videos:
+     card_02_03.mp4 (172KB) — TWO HANDS, landscape, LEFT-RIGHT rock
+     card_01_03.mp4 (206KB) — hold, UP-DOWN rock
+
+   Orientation system:
+     'lr' = Left/Right → card_02_03.mp4, rotateY tilt & flip
+     'ud' = Up/Down   → card_01_03.mp4, rotateX tilt & flip
+
+   Per-effect orientation support:
+     2 Image Flip  — lr + ud
+     3D            — lr only
+     Layered 3D    — lr only
+     Animation     — lr + ud
+     Zoom          — lr + ud
+     Stereoscopic  — lr only
+
+   PSD parsing: ag-psd CDN (optional — falls back to regular image)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Effect definitions ─────────────────────────────────────── */
+const EFFECTS = [
+  {
+    id: 'flip',
+    name: '2 Image Flip',
+    icon: '🔄',
+    desc: 'Your design flips between two images as the card tilts — a classic lenticular reveal.',
+    numImages: 2,
+    imgLabels: ['Image 1', 'Image 2'],
+    accept: ['.psd,image/*', '.psd,image/*'],
+    psd: false,
+    orientations: ['lr', 'ud'],
+    tips: ['Use two contrasting images for maximum impact.', 'High contrast between images makes the flip most dramatic.', 'PSD files are accepted too (flattened automatically).'],
+    steps: ['Upload Image 1', 'Upload Image 2', 'Click Generate Preview'],
+    hintText: 'Watch both images reveal as the card tilts'
+  },
+  {
+    id: 'morph',
+    name: 'Morph',
+    icon: '🌀',
+    desc: 'Your two images smoothly morph into each other as the card tilts — an organic, flowing transformation.',
+    numImages: 2,
+    imgLabels: ['Image 1', 'Image 2'],
+    accept: ['.psd,image/*', '.psd,image/*'],
+    psd: false,
+    orientations: ['lr', 'ud'],
+    tips: ['IMPORTANT: morphing only works between objects of similar structure, e.g. two cars, two faces (human or animal), two flowers. Completely different objects (a bike and a football, a tree and a building) will not morph properly.', 'Works best when the two images share similar composition and framing.', 'PSD files are accepted too (flattened automatically).'],
+    steps: ['Upload Image 1', 'Upload Image 2', 'Click Generate Preview'],
+    hintText: 'Watch the two images flow into each other as the card tilts'
+  },
+  {
+    id: 'threed',
+    name: '3D',
+    icon: '🎭',
+    desc: 'Your design appears to have real depth — elements float above the card surface as it tilts.',
+    numImages: 1,
+    imgLabels: ['Your Design'],
+    accept: ['.psd,image/*'],
+    psd: false,
+    orientations: ['lr', 'ud'],
+    tips: ['Images with a clear foreground subject work best.', 'Move your mouse over the preview for extra depth.', 'PSD files are accepted too (flattened automatically).'],
+    steps: ['Upload your design', 'Click Generate Preview', 'Move your mouse over the card for depth'],
+    hintText: 'Move your mouse over the card for added depth'
+  },
+  {
+    id: 'layered3d',
+    name: 'Layered 3D',
+    icon: '📐',
+    desc: 'Each layer of your PSD sits at its own depth. Background layers shift one way, foreground layers the other, creating real layered depth as the card tilts.',
+    numImages: 1,
+    imgLabels: ['Your PSD File (layers = depth planes)'],
+    accept: ['.psd'],
+    psd: true,
+    orientations: ['lr', 'ud'],
+    tips: ['Each element on its own PSD layer — bottom layer = background, top layer = closest to the viewer.', 'Keep the background layer larger than the card so edges never show when it shifts.', '3–6 layers give the strongest depth. More layers = smoother depth graduation.'],
+    steps: ['Prepare a PSD with each element on its own layer', 'Upload the PSD file', 'Click Generate Preview', 'Watch the layers separate in depth as the card tilts'],
+    hintText: 'PSD layers shift at different rates — true layered depth'
+  },
+  {
+    id: 'animation',
+    name: 'Animation',
+    icon: '🎬',
+    desc: 'Each layer of your PSD is an animation frame — motion comes alive as the card catches the light.',
+    numImages: 1,
+    imgLabels: ['Your PSD File'],
+    accept: ['.psd,image/*'],
+    psd: true,
+    orientations: ['lr', 'ud'],
+    tips: ['Each layer = one animation frame (bottom layer = frame 1).', 'Up to 6 frames work best for smooth lenticular animation.'],
+    steps: ['Upload your PSD file (layers as frames)', 'Click Generate Preview', 'Watch the animation play'],
+    hintText: 'PSD layers cycle as the card tilts'
+  },
+  {
+    id: 'zoom',
+    name: 'Zoom',
+    icon: '🔍',
+    desc: 'Your design dramatically zooms in and out as the card tilts — an eye-catching perspective shift.',
+    numImages: 1,
+    imgLabels: ['Your PSD File'],
+    accept: ['.psd,image/*'],
+    psd: true,
+    orientations: ['lr', 'ud'],
+    tips: ['Works best with a strong central focal point.', 'Logos, faces and bold imagery zoom most effectively.'],
+    steps: ['Upload your PSD file (or image)', 'Click Generate Preview', 'Watch the zoom effect pulse'],
+    hintText: 'The zoom pulses as the card tilts'
+  },
+  {
+    id: 'stereoscopic',
+    name: 'Stereoscopic',
+    icon: '👀',
+    desc: 'True stereoscopic 3D from two slightly offset images. As the card tilts, the view sweeps between them, and the parallax between the two views creates the 3D depth. No glasses needed.',
+    numImages: 2,
+    imgLabels: ['Image 1 (Left view)', 'Image 2 (Right view)'],
+    accept: ['.psd,image/*', '.psd,image/*'],
+    psd: false,
+    orientations: ['lr', 'ud'],
+    tips: ['Shoot or render the same scene from two positions a few centimetres apart.', 'Image 1 = left view, Image 2 = right view. The small offset between them is what creates the depth.', 'The bigger the offset, the stronger (but harsher) the 3D. A few centimetres is ideal.', 'PSD files are accepted too (flattened automatically).'],
+    steps: ['Upload the left view image', 'Upload the right view image', 'Click Generate Preview', 'Watch the depth appear as the card tilts'],
+    hintText: 'The card tilt sweeps between your two offset views — that parallax is the 3D'
+  },
+  {
+    id: 'sequence',
+    name: 'Frame Sequence',
+    icon: '🎞️',
+    desc: 'Drop your After Effects or Triaxes exported frame sequence — the web app scrubs through it in perfect sync with the card tilt. No quality limits.',
+    numImages: 0,
+    imgLabels: [],
+    accept: [],
+    psd: false,
+    orientations: ['lr', 'ud'],
+    tips: [
+      'Export PNG sequence from After Effects: Composition > Add to Render Queue, Output Module = PNG Sequence.',
+      'From Triaxes: File > Export Frames to folder.',
+      'Select all PNG files at once, or drag a whole folder onto the drop zone.',
+      'Also accepts a ZIP archive of your frames.',
+      '30 to 60 frames is ideal — more is subsampled automatically.',
+      'Frame 1 = card tilted fully left, last frame = fully right.'
+    ],
+    steps: [
+      'Export your frames from After Effects or Triaxes as a PNG sequence',
+      'Drag all the PNG files (or a ZIP) onto the drop zone below',
+      'Click Generate Preview',
+      'Move the mouse left/right over the card to scrub through your sequence'
+    ],
+    hintText: 'Move mouse left/right to scrub through your frame sequence'
+  }
+];
+
+/* ── App state ──────────────────────────────────────────────── */
+const S = {
+  effectIdx:   0,
+  orientation: 'lr',  /* 'lr' = left/right | 'ud' = up/down */
+  cardFit: 'landscape', /* 'landscape' = cover-crop | 'portrait' = full image over blur fill */
+  images:      [],    /* data URLs (flat/first layer) per slot */
+  psdLayers:   [],    /* arrays of layer dataURLs per slot */
+  depthMaps:   [],    /* depth map data URLs per slot (for layered3d) */
+  sculptokKey: '',    /* Sculptok API key for auto-generation */
+  seqFrames:   [],    /* data URLs for frame sequence effect */
+  animFrame:   null,
+  mouseX:      0,
+  mouseY:      0,
+  frameFn:     null,  /* active effect's source-frame provider: (now, tilt) => canvas */
+};
+
+/* ── DOM refs ───────────────────────────────────────────────── */
+const uploadPanel  = document.getElementById('uploadPanel');
+const previewPanel = document.getElementById('previewPanel');
+
+/* ═══════════════════════════════════════════════════════════════
+   PSD PARSING (ag-psd)
+   ═══════════════════════════════════════════════════════════════ */
+async function parsePSD(file) {
+  if (!file.name.toLowerCase().endsWith('.psd') || typeof AgPsd === 'undefined') return null;
+  try {
+    const buffer = await file.arrayBuffer();
+    const psd    = AgPsd.readPsd(buffer, { skipThumbnail: false, useImageData: true });
+    const W = psd.width, H = psd.height;
+
+    /* Flatten composite */
+    const flatCanvas = document.createElement('canvas');
+    flatCanvas.width = W; flatCanvas.height = H;
+    const flatCtx = flatCanvas.getContext('2d');
+    if (psd.canvas)     flatCtx.drawImage(psd.canvas, 0, 0);
+    else if (psd.imageData) flatCtx.putImageData(psd.imageData, 0, 0);
+    const flat = flatCanvas.toDataURL();
+
+    /* Extract visible layers (bottom→top = frame 1→last) */
+    /* Extract ALL layers, bottom→top, INCLUDING HIDDEN ONES (2026-07-02):
+       animation PSDs are usually saved with most frame-layers toggled off
+       (the user's dancing PSD had 5 of 6 hidden, the car 14 of 16 →
+       "does nothing at all"). Every layer is a frame / depth plane here,
+       so Photoshop visibility is irrelevant.                            */
+    const layers = [];
+    const extractLayers = (children) => {
+      if (!children) return;
+      for (const layer of children) {
+        if (layer.children) { extractLayers(layer.children); continue; }
+        if (!layer.canvas && !layer.imageData) continue;
+        const lc = document.createElement('canvas');
+        lc.width = W; lc.height = H;
+        const lx = lc.getContext('2d');
+        if (layer.canvas)     lx.drawImage(layer.canvas, layer.left || 0, layer.top || 0);
+        else if (layer.imageData) lx.putImageData(layer.imageData, layer.left || 0, layer.top || 0);
+        layers.push(lc.toDataURL());
+      }
+    };
+    extractLayers(psd.children);
+    return { flat, layers: layers.length ? layers : [flat] };
+  } catch (err) {
+    console.warn('PSD parse error:', err);
+    return null;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HAND VIDEO + CANVAS COMPOSITING
+   ═══════════════════════════════════════════════════════════════ */
+let handVideoEl  = null;
+let handCanvasEl = null;
+let handCtx      = null;
+let chromaActive = false;
+let _workCanvas  = null, _workCtx = null;
+let _lastFrame   = 0;
+const FPS        = 12;
+const SCALE      = 1;
+/* How much of the hand's real motion the card overlay tracks.
+   MUST be 1.0 — the card's motion is baked into the video, so the overlay
+   has to follow the tracked corners 100% or it visibly tears away from the
+   placeholder (dead space at motion extremes). Same principle as an
+   After Effects corner-pin: the insert follows the track exactly.
+   To make the hand move less, the videos themselves must be re-shot or
+   slowed — never reduce this value. */
+const MOTION_SCALE = 1.0;
+/* Live bounding box of the chroma-keyed card region, updated every frame */
+let _liveCardBounds = null;
+/* Stable card dimensions — locked on first clean detection, never resized */
+let _stableCardW = 0, _stableCardH = 0;
+/* Raw card centre from chroma key (12 fps) — smoothing done in draw() at 60 fps */
+let _rawCardCX = null, _rawCardCY = null;
+let _q0ForExt = null;   /* unflared card quad — portrait extension geometry */
+let _thumbCutY = 0;     /* portrait: video re-drawn below this y (thumbs)   */
+/* Portrait upright-print stabilisers — smoothed centre / held width / bottom,
+   so the straight print does not jump left-right or pulse narrow as the card
+   rocks (would reveal the black backdrop behind it). */
+let _portCx = null, _portHW = 0, _portBot = null;
+let _thumbLX = 0, _thumbRX = 0;   /* portrait: grip x-positions for thumb restore */
+let _handTmp = null, _handTmpCtx = null;   /* scratch canvas for skin-only hand overlay */
+
+
+/* ── Per-frame card corner tracking data (loaded from tracking_data.json) ── */
+let trackingData = null;
+fetch('tracking_data.json', { cache: 'no-cache' })
+  .then(r => r.json())
+  .then(d => { trackingData = d; console.log('[tracking] loaded:', Object.keys(d)); })
+  .catch(() => console.warn('[tracking] tracking_data.json not found — bounding-box fallback'));
+
+function startHandComposite() {
+  handVideoEl  = document.getElementById('handVideo');
+  handCanvasEl = document.getElementById('handCanvas');
+  if (!handVideoEl || !handCanvasEl) return;
+
+  /* Plain 2D context — handCanvas is only ever DRAWN to (composited),
+     never read back, so no willReadFrequently (keeps GPU path fast). */
+  handCtx      = handCanvasEl.getContext('2d');
+  chromaActive = true;
+
+  /* Choose video based on orientation:
+       'lr' → card_01_03.mp4 (left-right rock)
+       'ud' → card_02_03.mp4 (up-down rock)           */
+  handVideoEl.src         = S.orientation === 'lr' ? 'card_01_03.mp4' : 'card_02_03.mp4';
+  handVideoEl.muted       = true;
+  handVideoEl.loop        = true;
+  handVideoEl.playsInline = true;
+
+  /* Sync tilt duration to video loop */
+  handVideoEl.addEventListener('loadedmetadata', () => {
+    const dur = handVideoEl.duration;
+    if (dur && isFinite(dur) && dur > 0) {
+      document.documentElement.style.setProperty('--tilt-dur', dur + 's');
+    }
+  }, { once: true });
+
+  /* Start the unified compositor chain. The generation token guarantees
+     exactly one active chain even across orientation / effect restarts. */
+  _composeGen++;
+  composite(_composeGen);
+  _vfcMediaTime = -1;                    /* stale — new video, new timeline */
+  _armVFC(handVideoEl, _composeGen);     /* frame-accurate timestamps       */
+
+  handVideoEl.play().catch(() => {});
+
+  /* Robust playback recovery: browsers pause the video when autoplay is
+     blocked or the window is hidden. Keep retrying so the hands return. */
+  if (!window._playRecovery) {
+    window._playRecovery = true;
+    const resume = () => {
+      if (handVideoEl && chromaActive && handVideoEl.paused) handVideoEl.play().catch(() => {});
+    };
+    document.addEventListener('click', resume);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') resume();
+    });
+    setInterval(resume, 2000);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   UNIFIED COMPOSITOR — ONE canvas, ONE loop, perfect frame-lock
+   ─────────────────────────────────────────────────────────────
+   Every animation frame, from the SAME video frame:
+     1. Warp the active effect's source image onto the tracked card
+        quad (bottom layer).
+     2. Chroma-key the SAME video frame (green → transparent) and draw
+        the result (hands + background) on top.
+   Because both layers come from one video frame at one currentTime,
+   the image and the placeholder are LOCKED together — they cannot
+   drift independently. The green hole reveals the image beneath it,
+   so there is no dead space (the hole IS where the image is), and the
+   hands, being opaque video, always paint on top. This is exactly how
+   an After Effects corner-pin composite locks an insert to a track.
+   ═══════════════════════════════════════════════════════════════ */
+let _composeGen  = 0;
+let _composeWork = null, _composeWorkCtx = null;
+let _smBR = null, _smBL = null;   /* temporally-smoothed bottom corners */
+
+/* Render ONE composited frame using `mediaTime` — the exact presentation
+   timestamp of the video frame being shown. Corners, tilt, hands and image
+   all derive from this single time, so they are frame-locked.
+
+   Why mediaTime and not currentTime: `video.currentTime` reports the decode
+   position, which LEADS the frame actually painted by drawImage() by ~1-2
+   frames. Using it made the image warp to where the card WILL be while the
+   hands showed where it IS — so during fast motion the image slid off the
+   card (a velocity-dependent offset, worst at the rock extremes). mediaTime
+   is the timestamp of the very frame drawImage paints, eliminating that. */
+function _composeFrame(mediaTime) {
+  _lastComposeTs = performance.now();   /* rAF-watchdog heartbeat */
+  const scene = document.getElementById('handScene');
+  const v = handVideoEl;
+  if (!scene || !v || v.readyState < 2 || !handCtx) return;
+
+  const W = scene.offsetWidth, H = scene.offsetHeight;
+  if (!W || !H) return;
+  if (handCanvasEl.width  !== W) handCanvasEl.width  = W;
+  if (handCanvasEl.height !== H) handCanvasEl.height = H;
+  if (!_composeWork) {
+    _composeWork    = document.createElement('canvas');
+    _composeWorkCtx = _composeWork.getContext('2d', { willReadFrequently: true });
+  }
+  if (_composeWork.width  !== W) _composeWork.width  = W;
+  if (_composeWork.height !== H) _composeWork.height = H;
+
+  const isUD     = S.orientation === 'ud';
+  const videoKey = isUD ? 'card_02_03' : 'card_01_03';
+
+  /* ── Letterbox rect of the video inside the scene (shared helper —
+        portrait mode shrinks and bottom-anchors the whole scene) ───── */
+  const { dx, dy, dw, dh } = _videoLetterbox(W, H);
+
+  /* ── Draw THIS frame, chroma-key it, AND find the 4 card corners in
+        ONE pass over the same pixels. Using the LIVE green quad as the
+        warp target is what locks the image edges to the placeholder
+        edges: both come from the identical pixels of this one frame, so
+        they can never drift apart — any jitter is shared, not relative.
+        Extreme points of (x+y) and (x−y) give the quad corners; thumbs
+        only remove green where they occlude, which is exactly where the
+        image should stop (and the thumb is drawn on top to cover it).  */
+  const wc = _composeWorkCtx;
+  wc.clearRect(0, 0, W, H);
+  /* (v6 final: no portrait backdrop fill here — the output scene never draws
+     the video background, only skin pixels are lifted from this canvas.)   */
+  wc.drawImage(v, dx, dy, dw, dh);
+  /* Perf (2026-07-02, "preview sometimes freezes"): only the letterbox band
+     dy..dy+dh contains video pixels — scanning just that band instead of the
+     full canvas cuts the per-frame pixel work ~3× on portrait scenes.      */
+  const bandY = Math.max(0, Math.floor(dy));
+  const bandH = Math.min(H - bandY, Math.ceil(dh) + 1);
+  /* x-range restricted to the video band too: the portrait ambient
+     backdrop outside it must never be chroma-keyed                    */
+  const bandX0 = Math.max(0, Math.floor(dx));
+  const bandX1 = Math.min(W, Math.ceil(dx + dw));
+  const id = wc.getImageData(0, bandY, W, bandH), d = id.data;
+  let sMin=Infinity, sMax=-Infinity, fMin=Infinity, fMax=-Infinity, gn=0;
+  let TLx=0,TLy=0, TRx=0,TRy=0, BRx=0,BRy=0, BLx=0,BLy=0;
+  for (let y = 0; y < bandH; y++) {
+    const row = y * W, yAbs = y + bandY;
+    for (let xx = bandX0; xx < bandX1; xx++) {
+      const i = (row + xx) * 4;
+      const g = d[i+1];
+      if (g > 100 && g > d[i] * 1.5 && g > d[i+2] * 1.5) {
+        d[i+3] = 0; gn++;
+        const s = xx + yAbs, f = xx - yAbs;
+        if (s < sMin) { sMin = s; TLx = xx; TLy = yAbs; }
+        if (s > sMax) { sMax = s; BRx = xx; BRy = yAbs; }
+        if (f > fMax) { fMax = f; TRx = xx; TRy = yAbs; }
+        if (f < fMin) { fMin = f; BLx = xx; BLy = yAbs; }
+      } else if (g > 60 && 2 * g > (d[i] + d[i+2]) * 1.35) {
+        /* SOFT keying for the card's anti-aliased edge pixels (2026-07-02,
+           3x-zoom diagnosis): the binary threshold left the borderline
+           dark-green edge pixels opaque — a broken dark/green rim drawn
+           over the print along the hole boundary. Fade them by greenness
+           instead: the card edge now blends the print smoothly into the
+           scene. Corner detection stays on the strict test above.      */
+        const excess = 2 * g - (d[i] + d[i+2]) * 1.35;
+        const a = 255 - Math.min(255, Math.round(excess * 3.2));
+        if (a < d[i+3]) d[i+3] = a;
+      }
+    }
+  }
+  wc.putImageData(id, 0, bandY);
+
+  /* (v6 final: portrait edge fades REMOVED — they darkened hand pixels near
+     the band edges, which made the skin extraction eat the hands away there
+     ("hands blur at the edges", user 2026-07-04). With the video background
+     never drawn in portrait, the fades had no purpose left anyway.)        */
+
+  /* ── Build the warp quad (the LOCKED-IN 0%-dead-space version) ───────────
+     Top corners: LIVE green detection (never occluded → perfect).
+     Bottom corners: the thumbs occlude them, so they can't be detected live.
+     Fit the rigid card shape (from tracking data) onto the live top edge each
+     frame (similarity transform) and read the bottom corners off it — the
+     bottom is locked to the live top and moves with the card like the top.
+
+     Then FLARE the two bottom corners outward (BOT_OV) so the image overshoots
+     the thumb-occluded corners → ZERO black wedges (this is the version the
+     user confirmed perfect). The flare overshoot is invisible: hidden behind
+     the thumbs/background, only the green hole reveals the image. NO temporal
+     smoothing on the bottom — the smoothing was what lagged the bottom and
+     made it appear to track differently from the top; without it the bottom
+     is locked rigidly to the live top, frame for frame.                    */
+  const trackCorners = getDisplayCorners(videoKey, mediaTime);
+  let corners = null;
+
+  if (gn > 800 && trackCorners) {
+    const liveTL = { x: TLx, y: TLy }, liveTR = { x: TRx, y: TRy };
+    const tTL = trackCorners[0], tTR = trackCorners[1], tBR = trackCorners[2], tBL = trackCorners[3];
+
+    const tdx = tTR.x - tTL.x, tdy = tTR.y - tTL.y;
+    const ldx = liveTR.x - liveTL.x, ldy = liveTR.y - liveTL.y;
+    const tLen2 = tdx*tdx + tdy*tdy || 1;
+    const a = (ldx*tdx + ldy*tdy) / tLen2;   /* scale·cosθ */
+    const b = (ldy*tdx - ldx*tdy) / tLen2;   /* scale·sinθ */
+    const apply = p => ({
+      x: liveTL.x + a*(p.x - tTL.x) - b*(p.y - tTL.y),
+      y: liveTL.y + b*(p.x - tTL.x) + a*(p.y - tTL.y),
+    });
+    const reconBR = apply(tBR), reconBL = apply(tBL);
+    /* NOTE (2026-07-02): a "flex guard" that swapped reconBR/reconBL for the
+       live green extremes was tried here and REMOVED — the raw extremes
+       wander along the card hull frame-to-frame, so the quad breathed and
+       the image slid around inside the card on EVERY effect (user report:
+       "moves left/right and up/down like the 3d effect"). Bottom corners
+       must stay the RIGID reconstruction; the playback bottom-gap was fixed
+       by frame-accurate mediaTime (_armVFC/_bestMediaTime), not by this.  */
+
+    const q0 = [ liveTL, liveTR, reconBR, reconBL ];
+    const cx = (q0[0].x+q0[1].x+q0[2].x+q0[3].x)/4, cy = (q0[0].y+q0[1].y+q0[2].y+q0[3].y)/4;
+    const push = (p, s) => ({ x: cx + (p.x-cx)*s, y: cy + (p.y-cy)*s });
+    const TOP_OV = 1.03, BOT_OV = 1.28;      /* top tight, bottom flared → 0% dead.
+       1.18 still left a thin black wedge along the bottom edge in UD mid-swing
+       (user screenshot 2026-07-02): the bottom corners are thumb-occluded in
+       the TRACKING data too, so the reconstruction under-reaches there. The
+       extra flare is invisible — overshoot hides behind the opaque video.   */
+    corners = [ push(liveTL, TOP_OV), push(liveTR, TOP_OV),
+                push(reconBR, BOT_OV), push(reconBL, BOT_OV) ];
+    _q0ForExt = q0;              /* unflared quad — portrait extension dirs */
+    _rawCardCX = cx; _rawCardCY = cy;
+  } else {
+    corners = trackCorners;
+  }
+
+  /* Effect AMOUNT (flip switch / parallax) uses the smooth, correctly-phased
+     tracking-data tilt — robust to occlusion — while POSITION uses the quad
+     anchored to the live top edge above. */
+  const tilt = tiltFromCorners(trackCorners || corners, isUD);
+
+  /* ── PORTRAIT print extension (2026-07-02, final method) ─────────────
+     The filmed card is landscape and the footage is never altered.
+     Portrait mode extends the PRINT upward from the tracked card: the
+     bottom stays locked to the real card (hands grip it exactly as
+     filmed — like holding a large portrait print by its bottom), and the
+     upper part of the print continues over the plain background above
+     the card, drawn AFTER the video so it overlays it. The extension
+     follows the card's own edge directions, so it tilts and moves as one
+     rigid print. Target print aspect ≈ 4:5 (w:h).                      */
+  /* PORTRAIT v6 — FINAL (user-chosen 2026-07-04 night): clicking ▯ Portrait
+     must show an ACTUAL PORTRAIT-shaped card. Geometry = the v4 upright
+     grip-locked rectangle (sits straight, bottom corners between finger and
+     thumb). The v4 alignment complaint (image vs the tilted card's black edge)
+     is solved by DRAWING a straight black backing slightly larger than the
+     print and HIDING the real tilted card (excluded from the video layer), so
+     the black border is aligned with the image by construction.             */
+  let extCorners = null, overQuad = null, extClip = null;
+  if (S.cardFit === 'portrait' && corners) {
+    const q0 = _q0ForExt || corners;
+    const [, , BR, BL] = q0;             /* unflared tracked card — grip corners */
+    const rawCx = (BL.x + BR.x) / 2, rawHW = Math.abs(BR.x - BL.x) / 2;
+    const rawBot = Math.max(BL.y, BR.y);
+    if (_portCx == null || Math.abs(rawCx - _portCx) > 250) { _portCx = rawCx; _portHW = rawHW; _portBot = rawBot; }
+    const K = 0.35;                                  /* light: follows hands, kills jitter */
+    _portCx  += (rawCx  - _portCx)  * K;
+    _portBot += (rawBot - _portBot) * K;
+    _portHW  += (rawHW  - _portHW)  * K;
+    const cx = _portCx;
+    const halfW = Math.max(20, _portHW) * 1.02;     /* grip-to-grip + tiny pad */
+    const bottomY = _portBot;
+    let printH = (2 * halfW) / 0.8;                 /* portrait aspect 0.8 (w:h) */
+    let topY = bottomY - printH;
+    const margin = 6;
+    if (topY < margin) { topY = margin; printH = bottomY - topY; }   /* keep in frame */
+    const UL = { x: cx - halfW, y: topY }, UR = { x: cx + halfW, y: topY };
+    const LR = { x: cx + halfW, y: bottomY }, LL = { x: cx - halfW, y: bottomY };
+    extClip = [ UL, UR, LR, LL ];
+    const rcy = (topY + bottomY) / 2;
+    extCorners = extClip.map(p => ({ x: cx + (p.x - cx) * 1.01, y: rcy + (p.y - rcy) * 1.01 }));
+    overQuad = extClip;
+    _thumbCutY = bottomY - 0.15 * printH;           /* skin-restore band top */
+    if (window.__dbgGeo) window.__lastGeo = { corners, q0, extCorners, extClip, eTL: UL, eTR: UR, tilt, thumbCutY: _thumbCutY };
+  }
+  const warpQuad = extCorners || corners;
+
+  /* ── 1. Warp effect source onto the card quad (under the video) ── */
+  handCtx.clearRect(0, 0, W, H);
+  let src = null;
+  try { src = S.frameFn ? S.frameFn(mediaTime, tilt) : null; }
+  catch (e) { console.error('[compositor] frameFn error:', e); }
+
+  if (S.cardFit === 'portrait' && extClip) {
+    /* ── PORTRAIT v6 final draw (user 2026-07-04 night: "remove the black
+       placeholder"): the studio video background is NOT drawn at all, so the
+       keyed-out tilted card can never show as a dark shape behind the print.
+       Scene = flat dark backdrop + straight upright print + ONLY the hands
+       (skin pixels) composited on top. Nothing else exists to misalign.    */
+    handCtx.fillStyle = '#050608';
+    handCtx.fillRect(0, 0, W, H);
+    if (src) perspectiveDraw(handCtx, src, extCorners, 10);
+    /* hands: skin-only overlay from the whole video band, drawn in front so
+       the print sits between finger (behind print edge) and thumb (in front) */
+    if (_composeWorkCtx) {
+      const { dy: bdy, dh: bdh } = _videoLetterbox(W, H);
+      const bandTop = Math.max(0, Math.floor(bdy));
+      const bandH = Math.min(H, Math.ceil(bdy + bdh)) - bandTop;
+      if (bandH > 2) {
+        if (!_handTmp) { _handTmp = document.createElement('canvas'); _handTmpCtx = _handTmp.getContext('2d'); }
+        if (_handTmp.width !== W) _handTmp.width = W;
+        if (_handTmp.height !== bandH) _handTmp.height = bandH;
+        const img = _composeWorkCtx.getImageData(0, bandTop, W, bandH), dd = img.data;
+        for (let i = 0; i < dd.length; i += 4) {
+          const r = dd[i], g = dd[i + 1], b = dd[i + 2];
+          /* keep skin (hands): reddish and not dark; drop bg/grey/green */
+          if (!(r > 85 && r >= g && r - b > 12)) dd[i + 3] = 0;
+        }
+        _handTmpCtx.putImageData(img, 0, 0);
+        handCtx.drawImage(_handTmp, 0, bandTop);
+      }
+    }
+  } else {
+    /* ── LANDSCAPE (unchanged, locked-in 0%-dead pipeline) ── */
+    if (src && warpQuad) perspectiveDraw(handCtx, src, warpQuad, 10);
+    /* ── 2. Chroma-keyed SAME frame (hands + background) on top ── */
+    handCtx.drawImage(_composeWork, 0, 0);
+  }
+}
+
+/* Driver chain — rAF based. rAF keeps firing even when the tab is
+   backgrounded (throttled), so the preview never freezes; rVFC, by
+   contrast, stops entirely when the page isn't visible. We don't need
+   rVFC's mediaTime any more: the image corners are taken from the SAME
+   drawImage frame's green pixels inside _composeFrame, so edge-lock is
+   self-consistent regardless of the timing source. The generation token
+   ensures only the latest chain runs after a restart. */
+/* ── Frame-accurate media time (added 2026-07-02) ────────────────────────
+   During playback video.currentTime reports the DECODE position, not the
+   timestamp of the frame drawImage actually paints — a velocity-dependent
+   mismatch that made the reconstructed bottom corners use the card shape
+   from the wrong moment (visible as a bottom-edge gap at the fast parts of
+   the rock; invisible in paused/seek tests). rVFC gives the painted frame's
+   true mediaTime, but rVFC alone freezes in background windows — so rVFC
+   only CAPTURES timestamps here, it never drives rendering. The rAF loop +
+   watchdog below stay the drivers and fall back to currentTime whenever the
+   rVFC timestamp is stale.                                                */
+let _vfcMediaTime = -1, _vfcWall = 0;
+function _armVFC(v, gen) {
+  if (!v || !v.requestVideoFrameCallback) return;
+  v.requestVideoFrameCallback((now, meta) => {
+    if (gen !== _composeGen) return;         /* video changed — stop chain */
+    _vfcMediaTime = meta.mediaTime;
+    _vfcWall = performance.now();
+    _armVFC(v, gen);
+  });
+}
+function _bestMediaTime() {
+  if (_vfcMediaTime >= 0 && performance.now() - _vfcWall < 80) return _vfcMediaTime;
+  return handVideoEl ? handVideoEl.currentTime : 0;
+}
+
+function composite(gen) {
+  if (!chromaActive || gen !== _composeGen) return;
+  requestAnimationFrame(() => {
+    if (!chromaActive || gen !== _composeGen) return;
+    if (handVideoEl && handVideoEl.readyState >= 2) _composeFrame(_bestMediaTime());
+    composite(gen);
+  });
+}
+
+/* ── rAF watchdog (added 2026-07-02) ─────────────────────────────────────
+   Chromium suspends requestAnimationFrame entirely when it decides the
+   window is occluded/backgrounded (embedded preview panels, minimised
+   windows). The video keeps playing — timers and media are NOT suspended —
+   so the preview showed hands-video time advancing but a never-painted
+   canvas ("the preview is not working"). This interval pumps _composeFrame
+   whenever rAF has been silent for >120 ms, giving ~30 fps in any window
+   state. When rAF is healthy it does nothing (timestamp check only).     */
+let _lastComposeTs = 0;
+function _watchdogTick() {
+  if (!chromaActive) return;
+  if (performance.now() - _lastComposeTs < 120) return;
+  if (handVideoEl && handVideoEl.readyState >= 2) _composeFrame(_bestMediaTime());
+}
+/* Page timers get INTENSIVE THROTTLING after ~5 min hidden (clamped to one
+   tick per MINUTE — the preview froze in embedded panels). Worker timers
+   are exempt, so the watchdog beat comes from a Worker; the setInterval
+   below stays as a fallback for browsers that block inline workers.     */
+try {
+  const _wUrl = URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),33);'], { type: 'text/javascript' }));
+  const _watchdogWorker = new Worker(_wUrl);
+  _watchdogWorker.onmessage = _watchdogTick;
+} catch (e) { console.warn('[watchdog] worker unavailable, page timer only:', e); }
+setInterval(_watchdogTick, 500);
+
+/* Demo placeholder source — a soft green shimmer shown before upload */
+let _demoCvs = null;
+function demoSource() {
+  if (!_demoCvs) {
+    _demoCvs = document.createElement('canvas');
+    _demoCvs.width = 640; _demoCvs.height = 363;
+    const x = _demoCvs.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 640, 363);
+    g.addColorStop(0, '#1a3a2a'); g.addColorStop(.5, '#52bf90'); g.addColorStop(1, '#1a3a2a');
+    x.fillStyle = g; x.fillRect(0, 0, 640, 363);
+  }
+  return _demoCvs;
+}
+
+/* ── Calibration helper ─────────────────────────────────────────────────
+   Returns {cX, cY, cardW, cardH} for the neutral card position given the
+   video-letterbox rect (dx,dy,dw,dh) and orientation.                    */
+function _calibNeutral(dx, dy, dw, dh) {
+  let cardW, cardH, cX, cY;
+  if (S.orientation === 'lr') {
+    cardW = dw * 0.605; cardH = cardW / 1.72;
+    cX    = dx + dw * 0.504; cY = dy + dh * 0.451;
+  } else {
+    cardW = dw * 0.68; cardH = cardW / 1.75;
+    cX    = dx + dw * 0.49;  cY = dy + dh * 0.44;
+  }
+  return { cX, cY, cardW, cardH };
+}
+
+/* ── Letterbox helper (shared) ─────────────────────────────────────── */
+/* NOTE (2026-07-02): a "centre-cut splice" portrait attempt lived here —
+   it removed a vertical band of the video to pull the hands closer. It was
+   REMOVED: any tilt makes the card edge step at the seam, and compensating
+   shifts break the background/frame instead (user: "this is terrible").
+   Portrait mode is now the UPWARD PRINT EXTENSION in _composeFrame, which
+   never alters the filmed pixels. Do not re-attempt video splicing.      */
+
+function _videoLetterbox(W, H) {
+  const vR = (handVideoEl?.videoWidth  || 1920) /
+             (handVideoEl?.videoHeight || 1080);
+  const cR = W / H;
+  let dx=0, dy=0, dw=W, dh=H;
+  if (vR > cR) { dh = W / vR; dy = (H - dh) / 2; }
+  else         { dw = H * vR; dx = (W - dw) / 2; }
+  /* PORTRAIT v6: shrink the whole scene (hands + card together — a uniform
+     scale, no distortion) and anchor it flush to the bottom, leaving
+     headroom above for the taller 4:5 upright print. */
+  if (S.cardFit === 'portrait') {
+    const k = 0.72;
+    dx += dw * (1 - k) / 2;               /* keep horizontally centred  */
+    dy  = Math.max(0, H - dh * k);        /* flush to the bottom        */
+    dw *= k; dh *= k;
+  }
+  return { dx, dy, dw, dh };
+}
+
+/* ── Corner-pin homography (After Effects corner-pin maths) ─────────────
+   Returns a CSS matrix3d() string that maps a w×h box (origin top-left)
+   onto the 4 screen corners [TL,TR,BR,BL].  This is the projective
+   transform AE applies when you corner-pin an insert to a track.        */
+function cornerPinMatrix(w, h, c) {
+  const x0=c[0].x, y0=c[0].y, x1=c[1].x, y1=c[1].y,
+        x2=c[2].x, y2=c[2].y, x3=c[3].x, y3=c[3].y;
+  const dx1 = x1-x2, dx2 = x3-x2, dy1 = y1-y2, dy2 = y3-y2;
+  const sx  = x0-x1+x2-x3, sy = y0-y1+y2-y3;
+  const den = dx1*dy2 - dx2*dy1;
+  if (!den) return null;
+  const g = (sx*dy2 - sy*dx2) / den;
+  const hh = (dx1*sy - dy1*sx) / den;
+  const a = x1-x0+g*x1, b = x3-x0+hh*x3;
+  const d = y1-y0+g*y1, e = y3-y0+hh*y3;
+  return `matrix3d(${a/w},${d/w},0,${g/w},${b/h},${e/h},0,${hh/h},0,0,1,0,${x0},${y0},0,1)`;
+}
+
+/* Card area position — corner-pinned to the tracked card quad when
+   tracking data is available, so the green overlay and the placeholder
+   move together with zero breakage — exactly like the hand and card do. */
+function positionCardArea(dx, dy, dw, dh) {
+  const ca = document.getElementById('cardArea');
+  if (!ca) return;
+
+  /* ── Corner-pin path: glue the div to the per-frame tracked quad ────── */
+  const videoKey = S.orientation === 'lr' ? 'card_01_03' : 'card_02_03';
+  const time = (handVideoEl && handVideoEl.readyState >= 2) ? handVideoEl.currentTime : 0;
+  if (trackingData && trackingData[videoKey]) {
+    const corners = getDisplayCorners(videoKey, time);
+    if (corners) {
+      const W0 = 400, H0 = Math.round(400 / (S.orientation === 'lr' ? 1.72 : 1.75));
+      const m = cornerPinMatrix(W0, H0, corners);
+      if (m) {
+        ca.style.left   = '0px';
+        ca.style.top    = '0px';
+        ca.style.width  = W0 + 'px';
+        ca.style.height = H0 + 'px';
+        ca.style.transformOrigin = '0 0';
+        ca.style.transform = m;
+        /* The corner-pin IS the motion — kill the fake CSS rock so the
+           demo face doesn't double-rotate against the real track.       */
+        const cc = ca.querySelector('#cardContent');
+        if (cc) cc.classList.remove('card-tilting', 'card-tilting-ud');
+        return;
+      }
+    }
+  }
+  ca.style.transform = '';
+
+  /* ── Live chroma bounding-box path (before tracking data loads) ─────── */
+  if (_liveCardBounds && _rawCardCX !== null) {
+    ca.style.width  = _stableCardW + 'px';
+    ca.style.height = _stableCardH + 'px';
+    ca.style.left   = (_rawCardCX - _stableCardW / 2) + 'px';
+    ca.style.top    = (_rawCardCY - _stableCardH / 2) + 'px';
+    return;
+  }
+
+  /* ── Fallback: calibrated percentages (used before video starts) ───── */
+  if (dx === undefined) {
+    const scene = document.getElementById('handScene');
+    if (!scene) return;
+    const W = scene.offsetWidth, H = scene.offsetHeight;
+    ({ dx, dy, dw, dh } = _videoLetterbox(W, H));
+  }
+
+  const { cX, cY, cardW, cardH } = _calibNeutral(dx, dy, dw, dh);
+  ca.style.width  = Math.round(cardW) + 'px';
+  ca.style.height = Math.round(cardH) + 'px';
+  ca.style.left   = Math.round(cX - cardW / 2) + 'px';
+  ca.style.top    = Math.round(cY - cardH / 2) + 'px';
+}
+
+function stopHandComposite() {
+  chromaActive = false;        /* compositor chain self-exits next tick */
+  _composeGen++;               /* invalidate any in-flight compositor chain */
+  _smBR = null; _smBL = null;  /* reset bottom-corner smoothing state */
+  S.frameFn = null;
+  _liveCardBounds = null;
+  _stableCardW = 0; _stableCardH = 0;
+  _rawCardCX = null; _rawCardCY = null;
+  /* Remove any legacy per-effect overlay canvases (no longer created,
+     but harmless to clean up if a stale one exists). */
+  ['_flipOverlay', '_morphOverlay', '_morphSVG', '_depthOverlay', '_seqOverlay',
+   '_animOverlay', '_zoomOverlay', '_stereoOverlay'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  });
+  if (handVideoEl) { handVideoEl.pause(); handVideoEl.src = ''; }
+  if (S.animFrame) { cancelAnimationFrame(S.animFrame); S.animFrame = null; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MOUSE TRACKING
+   ═══════════════════════════════════════════════════════════════ */
+function attachMouseTracking() {
+  const scene = document.getElementById('handScene');
+  if (!scene) return;
+  scene.addEventListener('mousemove', e => {
+    const r  = scene.getBoundingClientRect();
+    S.mouseX = ((e.clientX - r.left) / r.width  - 0.5) * 2;
+    S.mouseY = ((e.clientY - r.top)  / r.height - 0.5) * 2;
+  });
+  scene.addEventListener('mouseleave', () => { S.mouseX = 0; S.mouseY = 0; });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ORIENTATION TOGGLE
+   ═══════════════════════════════════════════════════════════════ */
+function setOrientation(orient) {
+  if (orient === S.orientation) return;
+  S.orientation = orient;
+
+  /* Update toggle button states (scoped — the fit bar reuses the class) */
+  document.querySelectorAll('#orientBar .orient-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.orient === orient);
+  });
+
+  /* Restart with new video — regenerate if images ready, else placeholder */
+  stopHandComposite();
+  const eff    = EFFECTS[S.effectIdx];
+  const ready  = S.images.filter(Boolean).length >= eff.numImages;
+  if (ready) generatePreview();
+  else       showPlaceholder();
+}
+
+/* Landscape / Portrait image fit (2026-07-02): portrait shows the WHOLE
+   image un-cropped over a blurred fill; landscape is the classic cover
+   crop. Re-renders the active effect so the change is instant.        */
+function setCardFit(fit) {
+  if (fit === S.cardFit) return;
+  S.cardFit = fit;
+  document.querySelectorAll('#fitBar .orient-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.fit === fit);
+  });
+  const eff   = EFFECTS[S.effectIdx];
+  const ready = eff.id === 'sequence' ? S.seqFrames.length > 0
+                                      : S.images.filter(Boolean).length >= eff.numImages;
+  if (ready) generatePreview();
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BUILD PREVIEW PANEL
+   ═══════════════════════════════════════════════════════════════ */
+function buildPreviewPanel(demoMode) {
+  const eff       = EFFECTS[S.effectIdx];
+  const hasOrient = eff.orientations.length > 1;
+  const lrLabel   = '↔ Left / Right';
+  const udLabel   = '↕ Up / Down';
+  const isUD      = S.orientation === 'ud';
+  const tiltClass = isUD ? 'card-tilting-ud' : 'card-tilting';
+
+  /* Demo placeholder — always a single green shimmer, no animation.
+     The card-tilting class rocks the whole card; no flip here.    */
+  const demoInner = demoMode
+    ? `<div class="demo-card-face"><span>${eff.name}</span></div>`
+    : '<div class="spinner"></div>';
+
+  /* cardArea/cardContent kept in the DOM (effects receive cardContent as a
+     handle) but hidden — the unified compositor canvas now does ALL
+     rendering, so nothing must show through the green hole behind it. */
+  previewPanel.innerHTML = `
+    <div class="hand-scene" id="handScene">
+      <div class="scene-bg"></div>
+      <div id="cardArea" style="display:none">
+        <div id="cardContent" class="${tiltClass}">
+          ${demoInner}
+        </div>
+      </div>
+      <video id="handVideo" muted playsinline loop preload="auto"></video>
+      <canvas id="handCanvas"></canvas>
+    </div>
+
+    <div class="preview-footer" id="previewFooter">
+      <div class="preview-effect-name">${eff.icon} ${demoMode ? eff.name : eff.name + ' Preview'}</div>
+      <div class="preview-hint" id="previewHint">${demoMode ? 'Upload your image then click Generate Preview' : eff.hintText}</div>
+
+      ${hasOrient ? `
+      <div class="orient-bar" id="orientBar">
+        <button class="orient-btn${S.orientation === 'lr' ? ' active' : ''}" data-orient="lr"
+                onclick="setOrientation('lr')">${lrLabel}</button>
+        <button class="orient-btn${S.orientation === 'ud' ? ' active' : ''}" data-orient="ud"
+                onclick="setOrientation('ud')">${udLabel}</button>
+      </div>` : ''}
+
+      <div class="orient-bar" id="fitBar">
+        <button class="orient-btn${S.cardFit === 'landscape' ? ' active' : ''}" data-fit="landscape"
+                onclick="setCardFit('landscape')">▭ Landscape</button>
+        <button class="orient-btn${S.cardFit === 'portrait' ? ' active' : ''}" data-fit="portrait"
+                onclick="setCardFit('portrait')">▯ Portrait</button>
+      </div>
+
+      <div class="preview-controls" id="previewControls"></div>
+    </div>`;
+
+  /* Demo mode shows the shimmer placeholder; effect mode sets its own
+     frameFn in the render* function called right after this returns. */
+  S.frameFn = demoMode ? ((now, tilt) => demoSource()) : null;
+
+  attachMouseTracking();
+  startHandComposite();
+  return {
+    cardContent:     document.getElementById('cardContent'),
+    previewControls: document.getElementById('previewControls'),
+    previewHint:     document.getElementById('previewHint'),
+  };
+}
+
+function addCtrl(label, icon, onClick, active) {
+  const ctrl = document.getElementById('previewControls');
+  if (!ctrl) return;
+  const btn = document.createElement('button');
+  btn.className = 'btn-ctrl' + (active ? ' active' : '');
+  btn.innerHTML = `${icon} ${label}`;
+  btn.onclick   = onClick;
+  ctrl.appendChild(btn);
+  return btn;
+}
+
+function loadImages(srcs) {
+  return Promise.all(srcs.filter(Boolean).map(src => new Promise((res, rej) => {
+    const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = src;
+  })));
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SHOW PLACEHOLDER / GENERATE
+   ═══════════════════════════════════════════════════════════════ */
+function showPlaceholder() {
+  stopHandComposite();
+  buildPreviewPanel(true);
+}
+
+function generatePreview() {
+  stopHandComposite();
+  const refs = buildPreviewPanel(false);
+  refs.cardContent.innerHTML = '';
+  ({
+    flip:         renderFlip,
+    /* True feature morph — face-landmark Delaunay mesh (or optical flow
+       for non-faces), pre-generated frames scrubbed by the card tilt
+       through the unified compositor (frameFn), same as every effect. */
+    morph:        renderMorph,
+    threed:       renderThreed,
+    layered3d:    renderLayered3d,
+    animation:    renderAnimation,
+    zoom:         renderZoom,
+    stereoscopic: renderStereoscopic,
+    sequence:     renderSequence,
+  })[EFFECTS[S.effectIdx].id](refs.cardContent, refs);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: 2 Image Flip
+/* ═══════════════════════════════════════════════════════════════
+   PERSPECTIVE WARP UTILITIES
+   ─────────────────────────────────────────────────────────────
+   perspectiveDraw(ctx, src, corners, N)
+     Draws src (HTMLCanvasElement / HTMLImageElement) perspective-
+     warped into the quad defined by corners [TL,TR,BR,BL] using
+     an N×N triangle grid with affine mapping per cell.  N=8 gives
+     good quality with 128 draw calls — imperceptible seams.
+
+   getDisplayCorners(videoKey, time)
+     Looks up per-frame card corners from tracking_data.json for
+     the given video and playback time, then scales them from the
+     1920×1080 video coordinate space to the live handScene size.
+     Falls back to the chroma-key bounding box if data missing.
+
+   drawCover(ctx, img, W, H)
+     Draws img into a W×H canvas centred and cropped (object-fit:cover).
+   ═══════════════════════════════════════════════════════════════ */
+
+function perspectiveDraw(ctx, src, corners, N) {
+  N = N || 8;
+  const srcW = src.width  || src.naturalWidth  || 320;
+  const srcH = src.height || src.naturalHeight || 186;
+
+  /* Bilinear interpolation of the 4-corner quad */
+  function bilerp(t, s) {
+    const top = { x: corners[0].x + t*(corners[1].x-corners[0].x),
+                  y: corners[0].y + t*(corners[1].y-corners[0].y) };
+    const bot = { x: corners[3].x + t*(corners[2].x-corners[3].x),
+                  y: corners[3].y + t*(corners[2].y-corners[3].y) };
+    return { x: top.x + s*(bot.x-top.x), y: top.y + s*(bot.y-top.y) };
+  }
+
+  /* Affine triangle: source UV → canvas XY via Cramer's rule.
+     The clip path is expanded ~0.75px outward from the triangle centroid
+     so adjacent triangles overlap slightly — kills the antialiased seam
+     grid lines that exact clipping leaves between cells.               */
+  function drawTri(x0,y0,x1,y1,x2,y2, u0,v0,u1,v1,u2,v2) {
+    const det = u0*(v1-v2) + u1*(v2-v0) + u2*(v0-v1);
+    if (Math.abs(det) < 0.5) return;
+    const a = (x0*(v1-v2) + x1*(v2-v0) + x2*(v0-v1)) / det;
+    const b = (y0*(v1-v2) + y1*(v2-v0) + y2*(v0-v1)) / det;
+    const c = (u0*(x1-x2) + u1*(x2-x0) + u2*(x0-x1)) / det;
+    const d = (u0*(y1-y2) + u1*(y2-y0) + u2*(y0-y1)) / det;
+    const e = (x0*(u1*v2-u2*v1) + x1*(u2*v0-u0*v2) + x2*(u0*v1-u1*v0)) / det;
+    const f = (y0*(u1*v2-u2*v1) + y1*(u2*v0-u0*v2) + y2*(u0*v1-u1*v0)) / det;
+    const gx = (x0+x1+x2)/3, gy = (y0+y1+y2)/3;
+    const PAD = 0.75;
+    const ex0 = expand(x0,y0), ex1 = expand(x1,y1), ex2 = expand(x2,y2);
+    function expand(px, py) {
+      const ddx = px-gx, ddy = py-gy;
+      const len = Math.sqrt(ddx*ddx+ddy*ddy) || 1;
+      return { x: px + ddx/len*PAD, y: py + ddy/len*PAD };
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(ex0.x,ex0.y); ctx.lineTo(ex1.x,ex1.y); ctx.lineTo(ex2.x,ex2.y);
+    ctx.closePath(); ctx.clip();
+    ctx.transform(a,b,c,d,e,f);
+    ctx.drawImage(src, 0, 0, srcW, srcH);
+    ctx.restore();
+  }
+
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const t0=i/N, t1=(i+1)/N, s0=j/N, s1=(j+1)/N;
+      const p00=bilerp(t0,s0), p10=bilerp(t1,s0);
+      const p11=bilerp(t1,s1), p01=bilerp(t0,s1);
+      const u0=t0*srcW, u1=t1*srcW, v0=s0*srcH, v1=s1*srcH;
+      drawTri(p00.x,p00.y, p10.x,p10.y, p11.x,p11.y, u0,v0, u1,v0, u1,v1);
+      drawTri(p00.x,p00.y, p11.x,p11.y, p01.x,p01.y, u0,v0, u1,v1, u0,v1);
+    }
+  }
+}
+
+/* ── Neutral calibrated corners (scene pixel coords) ───────────────────
+   Returns the 4 card corners at the resting neutral position.
+   Used by getDisplayCorners to blend tracking/chroma corners toward
+   neutral at MOTION_SCALE, giving 50% hand motion.                     */
+function _neutralCorners(videoKey, dx, dy, dw, dh) {
+  let cardW, cardH, cX, cY;
+  if (videoKey === 'card_01_03') {
+    cardW = dw * 0.605; cardH = cardW / 1.72;
+    cX = dx + dw * 0.504; cY = dy + dh * 0.451;
+  } else {
+    cardW = dw * 0.68; cardH = cardW / 1.75;
+    cX = dx + dw * 0.49;  cY = dy + dh * 0.44;
+  }
+  const x = cX - cardW/2, y = cY - cardH/2;
+  return [{x,y},{x:x+cardW,y},{x:x+cardW,y:y+cardH},{x,y:y+cardH}];
+}
+
+/* Blend two corner arrays at ratio t toward b (t=0→a, t=1→b) */
+function _blendCorners(a, b, t) {
+  return a.map((pa, i) => ({
+    x: pa.x + (b[i].x - pa.x) * t,
+    y: pa.y + (b[i].y - pa.y) * t,
+  }));
+}
+
+/* ── Card tilt from the TRACKED GEOMETRY (not a keyframe guess) ──────────
+   The card's real viewing angle is written in its corners: as it rocks, the
+   near edge grows and the far edge shrinks (perspective foreshortening). The
+   signed edge-length ratio gives the true tilt, and because it is computed
+   from the very corners we warp the image onto, it is automatically phase-
+   locked to the displayed card — every tilt-driven effect (flip, depth,
+   animation, zoom, sequence) now moves in exact sync with the visible rock.
+
+   This replaced a hand-tuned keyframe table that was INVERTED and out of
+   phase vs the real motion, which de-synced all the effects.
+
+   `ratio` spans roughly ±0.13 (LR) / ±0.09 (UD) for the filmed rock; the
+   per-orientation scale maps that to the ±1 range the effects expect.     */
+const _TILT_SCALE = { lr: 7.6, ud: 21.0 };
+function tiltFromCorners(c, isUD) {
+  if (!c) return 0;
+  const d = (a, b) => Math.hypot(c[a].x - c[b].x, c[a].y - c[b].y);
+  let ratio;
+  if (isUD) { const top = d(0,1), bot = d(3,2); ratio = (bot - top) / (bot + top); }
+  else      { const left = d(0,3), right = d(1,2); ratio = (right - left) / (right + left); }
+  return Math.max(-1, Math.min(1, ratio * (isUD ? _TILT_SCALE.ud : _TILT_SCALE.lr)));
+}
+
+/* Keyframe fallback, used only before tracking_data.json has loaded. */
+const CARD_LR_KF = [
+  {t:0.00, v:-12}, {t:0.20, v:-4},
+  {t:0.40, v: 10}, {t:0.60, v: 10},
+  {t:0.80, v:  3}, {t:1.00, v:-12}
+];
+const CARD_UD_KF = [
+  {t:0.00, v:  8}, {t:0.20, v:  2},
+  {t:0.40, v: -7}, {t:0.60, v: -7},
+  {t:0.80, v: -1}, {t:1.00, v:  8}
+];
+function _lerpCardKF(vp, kf) {
+  if (vp <= kf[0].t) return kf[0].v;
+  for (let i = 0; i < kf.length - 1; i++) {
+    if (vp >= kf[i].t && vp <= kf[i+1].t) {
+      const p = (vp - kf[i].t) / (kf[i+1].t - kf[i].t);
+      return kf[i].v + (kf[i+1].v - kf[i].v) * p*p*(3-2*p);
+    }
+  }
+  return kf[kf.length-1].v;
+}
+function cardTiltNorm(time, isUD) {
+  const videoKey = isUD ? 'card_02_03' : 'card_01_03';
+  const c = getDisplayCorners(videoKey, time);
+  if (c && trackingData && trackingData[videoKey]) return tiltFromCorners(c, isUD);
+  /* fallback before tracking data is available */
+  const dur = (handVideoEl && isFinite(handVideoEl.duration) && handVideoEl.duration)
+              ? handVideoEl.duration : 3;
+  const vp  = (time % dur) / dur;
+  const v   = _lerpCardKF(vp, isUD ? CARD_UD_KF : CARD_LR_KF);
+  return isUD ? (v - 0.5) / 7.5 : (v + 1) / 11;
+}
+
+function getDisplayCorners(videoKey, time) {
+  const scene = document.getElementById('handScene');
+  if (!scene || scene.offsetWidth === 0) return null;
+  const sW = scene.offsetWidth, sH = scene.offsetHeight;
+
+  /* ── Tracking-data path ───────────────────────────────────────────────
+     Sub-frame interpolation: blend between the two nearest tracked frames
+     so the quad moves continuously instead of snapping per video frame.
+     Overscan: inflate the quad 2.5% about its centroid so the image always
+     fully covers the card edge — the bleed is hidden behind the opaque
+     video, exactly like overscanning an After Effects corner-pin insert. */
+  if (trackingData && trackingData[videoKey]) {
+    const td = trackingData[videoKey];
+    const fExact = Math.max(0, Math.min(td.frames.length - 1, time * td.fps));
+    const f0 = Math.floor(fExact);
+    const f1 = Math.min(td.frames.length - 1, f0 + 1);
+    const ft = fExact - f0;
+    const raw0 = td.frames[f0], raw1 = td.frames[f1];
+    if (raw0 && raw1) {
+      const vW = td.width, vH = td.height;
+      const { dx, dy, dw, dh } = _videoLetterbox(sW, sH);
+      const tracked = raw0.map((pt, i) => ({
+        x: (pt[0] + (raw1[i][0] - pt[0]) * ft) / vW * dw + dx,
+        y: (pt[1] + (raw1[i][1] - pt[1]) * ft) / vH * dh + dy,
+      }));
+      /* Overscan about centroid — print-style bleed. The held card bows
+         slightly so its edges curve outside the straight 4-corner quad;
+         10% bleed swallows the bow completely. The excess is invisible:
+         it hides behind the opaque video, only the keyed green hole
+         reveals the overlay. */
+      const OVERSCAN = 1.10;
+      const cx = (tracked[0].x + tracked[1].x + tracked[2].x + tracked[3].x) / 4;
+      const cy = (tracked[0].y + tracked[1].y + tracked[2].y + tracked[3].y) / 4;
+      return tracked.map(p => ({
+        x: cx + (p.x - cx) * OVERSCAN,
+        y: cy + (p.y - cy) * OVERSCAN,
+      }));
+    }
+  }
+  /* ── Fallback 1: chroma-key bounding box as flat rectangle ─── */
+  if (_rawCardCX !== null && _stableCardW > 0) {
+    /* Re-derive the letterbox rect from scene + video dimensions */
+    const { dx, dy, dw, dh } = _videoLetterbox(sW, sH);
+    const neutral = _neutralCorners(videoKey, dx, dy, dw, dh);
+    /* Live chroma-key centre → flat corners */
+    const lx = _rawCardCX - _stableCardW/2, ly = _rawCardCY - _stableCardH/2;
+    const lw = _stableCardW, lh = _stableCardH;
+    const live = [{x:lx,y:ly},{x:lx+lw,y:ly},{x:lx+lw,y:ly+lh},{x:lx,y:ly+lh}];
+    return _blendCorners(neutral, live, MOTION_SCALE);
+  }
+  /* ── Fallback 2: calibrated percentages (works before video/tracking ready) ─── */
+  {
+    const { dx, dy, dw, dh } = _videoLetterbox(sW, sH);
+    return _neutralCorners(videoKey, dx, dy, dw, dh);
+  }
+}
+
+/* Effect source-canvas dimensions — portrait sources for the upright
+   portrait print so the perspective warp doesn't stretch anything.     */
+function cardSrcDims() {
+  return S.cardFit === 'portrait' ? { CW: 384, CH: 480 } : { CW: 640, CH: 363 };
+}
+
+function drawCover(ctx, img, W, H) {
+  /* Draw img centred + cropped into W×H (object-fit: cover) — ALWAYS.
+     A portrait "blur-fill" variant (blurred bars beside a contained
+     image) was tried and REMOVED 2026-07-03: on real photos it read as
+     smeared/blurry print edges (user screenshots). Real prints are
+     full-bleed; the portrait source canvas is already 4:5 via
+     cardSrcDims(), so the crop on portrait photos is mild.            */
+  const iW = img.naturalWidth  || img.width  || W;
+  const iH = img.naturalHeight || img.height || H;
+  const ir = iW/iH, cr = W/H;
+  let sx, sy, sw, sh;
+  if (ir > cr) { sh=iH; sw=sh*cr; sx=(iW-sw)/2; sy=0; }
+  else         { sw=iW; sh=sw/cr; sx=0; sy=(iH-sh)/2; }
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Flip — perspective-tracked image crossfade
+   ─────────────────────────────────────────────────────────────
+   Full-scene canvas (z:1) sits below the chroma hand canvas (z:2).
+   Per-frame corner data from tracking_data.json is used to
+   perspective-warp both images to the exact card quad each frame.
+   Crossfade opacity is driven by video currentTime via lerpKF,
+   same logic as before — no separate CSS animation needed.
+   ═══════════════════════════════════════════════════════════════ */
+function renderFlip(cc) {
+  cc.innerHTML = '';
+
+  /* Pre-load both images onto fixed-size card-aspect canvases. */
+  const { CW, CH } = cardSrcDims();
+  const offA = document.createElement('canvas'); offA.width=CW; offA.height=CH;
+  const offB = document.createElement('canvas'); offB.width=CW; offB.height=CH;
+  const comp = document.createElement('canvas'); comp.width=CW; comp.height=CH;
+  const ctxA = offA.getContext('2d');
+  const ctxB = offB.getContext('2d');
+  const cctx = comp.getContext('2d');
+  let imgsReady = 0;
+  const imgA = new Image(), imgB = new Image();
+  function onImgLoad() {
+    if (++imgsReady < 2) return;
+    drawCover(ctxA, imgA, CW, CH);
+    drawCover(ctxB, imgB, CW, CH);
+  }
+  imgA.onload = imgB.onload = onImgLoad;
+  imgA.src = S.images[0]; imgB.src = S.images[1];
+  if (imgA.complete) onImgLoad();
+  if (imgB.complete) onImgLoad();
+
+  let paused = false, op = 0;
+
+  /* frameFn: composite A→B crossfade on a FLAT canvas, return it.
+     The compositor does ONE perspective warp of the result — so there are
+     never two alpha-blended triangle grids overlapping (the old "squares").
+
+     FLIP TIMING — natural lenticular: the crossover is at the CENTRE of the
+     rock (tilt ≈ 0, card flat/head-on). As the card tilts away from centre the
+     image dissolves A↔B, the same way a real lenticular print changes with the
+     viewing angle. A sigmoid centred at 0 gives a smooth but defined switch:
+     image A is shown clearly when tilted one way, B the other, dissolving
+     through the centre. */
+  S.frameFn = (now, tilt) => {
+    if (imgsReady < 2) return null;
+
+    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre). */
+    const lensT = 1 / (1 + Math.exp(-7 * tilt));   /* 0 at −tilt, 1 at +tilt */
+    if (!paused) op += (lensT - op) * 0.5;          /* light de-jitter */
+    op = op < 0 ? 0 : op > 1 ? 1 : op;
+
+    /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
+    const a = op*op*op * (op*(op*6 - 15) + 10);
+
+    cctx.clearRect(0, 0, CW, CH);
+    cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
+    if (a > 0.002) { cctx.globalAlpha = a; cctx.drawImage(offB, 0, 0); cctx.globalAlpha = 1; }
+    return comp;
+  };
+
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Morph — autoimagemorphjs feature-based pixel warping
+   ─────────────────────────────────────────────────────────────
+   Uses aim_getfeaturepoints (automatic highest-contrast pixel per
+   grid cell — same principle as FantaMorph's Face Locator) and
+   aim_getframe (triangle rasterisation + cross-dissolve) to
+   pre-compute FRAMES morph frames. Each frame warps both source
+   images toward the interpolated mesh then dissolves between them.
+   Completely separate from renderFlip — no shared code.
+   ═══════════════════════════════════════════════════════════════ */
+function renderMorph(cc) {
+  const ca    = document.getElementById('cardArea');
+  const scene = document.getElementById('handScene');
+
+  cc.classList.remove('card-tilting', 'card-tilting-ud');
+  cc.removeAttribute('style');
+  cc.innerHTML = '';
+  if (ca) ca.style.overflow = '';
+  scene.style.overflow = '';
+
+  document.getElementById('_morphOverlay')?.remove();
+  document.getElementById('_morphSVG')?.remove();
+
+  /* ── Work canvas — 320×186 offscreen; receives ImageData frames ─
+     the unified compositor warps this to the live card corners.    */
+  const { CW: _dW, CH: _dH } = cardSrcDims();
+  const MW = Math.round(_dW / 2), MH = Math.round(_dH / 2);
+  const workCvs = document.createElement('canvas');
+  workCvs.width = MW; workCvs.height = MH;
+  const workCtx = workCvs.getContext('2d');
+
+  /* Number of pre-computed frames */
+  const FRAMES = 40;
+  let morphFrames = null;
+
+  /* ── Loading progress — silenced: image A shows on card during generation ── */
+  function showProgress(pct, label) { /* no-op — no loading overlay */ }
+
+  /* ── Preview canvas: shows image A on the card while frames generate ── */
+  const previewCvs = document.createElement('canvas');
+  previewCvs.width = MW; previewCvs.height = MH;
+  const previewCtx = previewCvs.getContext('2d');
+  let previewReady = false;
+  {
+    const tmpImg = new Image();
+    tmpImg.onload = () => {
+      drawCover(previewCtx, tmpImg, MW, MH);
+      previewReady = true;
+    };
+    tmpImg.src = S.images[0];
+    if (tmpImg.complete && tmpImg.naturalWidth > 0) {
+      drawCover(previewCtx, tmpImg, MW, MH);
+      previewReady = true;
+    }
+  }
+
+  /* ── Frame pre-generation ────────────────────────────────── */
+  /* ── Ensure face-api models are loaded before first use ────────────────
+     SSD MobileNet v1 (added 2026-07-02) is the PRIMARY detector — it is far
+     more robust than TinyFaceDetector, which kept missing the user's faces
+     and silently degraded every face morph to an optical-flow crossfade.
+     Tiny stays as fallback if the SSD weights fail to load.              */
+  let _faceApiReady = false, _ssdReady = false;
+  (async () => {
+    try {
+      if (typeof faceapi === 'undefined') return;
+      await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+      await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+      _faceApiReady = true;
+      try {
+        await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+        _ssdReady = true;
+      } catch(e) { console.warn('[morph] SSD detector unavailable, using tiny:', e); }
+      console.log('[morph] face-api models ready (ssd=' + _ssdReady + ')');
+    } catch(e) { console.warn('[morph] face-api load failed:', e); }
+  })();
+
+  /* ── Bowyer-Watson Delaunay triangulation ─────────────────────────────
+     Input: pts = [[x,y], …]
+     Output: array of [i0,i1,i2] index triples                            */
+  function delaunay(pts) {
+    const n = pts.length;
+    /* Super-triangle big enough to contain all points */
+    const M = 1e6;
+    const superPts = [[0,-M],[M*2,M],[(-M)*2,M]];
+    const all = pts.concat(superPts);
+    const si = n, sj = n+1, sk = n+2;
+    let tris = [[si,sj,sk]];
+
+    function circumscribes(ti, px, py) {
+      const [a,b,c] = tris[ti].map(i=>all[i]);
+      const ax=a[0]-px, ay=a[1]-py;
+      const bx=b[0]-px, by=b[1]-py;
+      const cx=c[0]-px, cy=c[1]-py;
+      return (ax*ax+ay*ay)*(bx*cy-by*cx)
+           - (bx*bx+by*by)*(ax*cy-ay*cx)
+           + (cx*cx+cy*cy)*(ax*by-ay*bx) > 0;
+    }
+
+    for (let pi = 0; pi < n; pi++) {
+      const [px,py] = pts[pi];
+      const bad = [], edgeCount = new Map();
+      for (let ti = 0; ti < tris.length; ti++) {
+        if (circumscribes(ti, px, py)) {
+          bad.push(ti);
+          const t = tris[ti];
+          const edges = [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]];
+          for (const [a,b] of edges) {
+            const key = Math.min(a,b)+','+ Math.max(a,b);
+            edgeCount.set(key, (edgeCount.get(key)||0)+1);
+          }
+        }
+      }
+      /* Remove bad triangles */
+      for (let i = bad.length-1; i >= 0; i--) tris.splice(bad[i], 1);
+      /* Re-triangulate boundary */
+      for (const [key, cnt] of edgeCount) {
+        if (cnt === 1) {
+          const [a,b] = key.split(',').map(Number);
+          tris.push([a, b, pi]);
+        }
+      }
+    }
+    /* Remove triangles touching super-triangle vertices */
+    return tris
+      .filter(t => !t.some(i => i >= n))
+      .map(t => [t[0], t[1], t[2]]);
+  }
+
+  /* ── Rasterise one morph triangle into output ImageData ──────────────
+     dst[0..2]: destination triangle vertices [[x,y],…]
+     src1/src2: corresponding source vertices in img A and img B         */
+  function rasterizeMorphTri(od, d1, d2, W, H, dst, src1, src2, alfa) {
+    const ia = 1 - alfa;
+    /* Bounding box of destination triangle */
+    const xs = dst.map(p=>p[0]), ys = dst.map(p=>p[1]);
+    const x0=Math.max(0, Math.floor(Math.min(...xs)));
+    const x1=Math.min(W-1, Math.ceil(Math.max(...xs)));
+    const y0=Math.max(0, Math.floor(Math.min(...ys)));
+    const y1=Math.min(H-1, Math.ceil(Math.max(...ys)));
+
+    /* Precompute inverse of destination triangle matrix for barycentric */
+    const [dv0,dv1,dv2] = dst;
+    const T00=dv0[0]-dv2[0], T01=dv1[0]-dv2[0];
+    const T10=dv0[1]-dv2[1], T11=dv1[1]-dv2[1];
+    const det = T00*T11 - T01*T10;
+    if (Math.abs(det) < 0.5) return;
+    const idet = 1/det;
+
+    function bilin(data, sx, sy) {
+      const bx=sx|0, by=sy|0;
+      const fx=sx-bx, fy=sy-by;
+      const bx2=Math.min(bx+1,W-1), by2=Math.min(by+1,H-1);
+      const wA=(1-fx)*(1-fy), wB=fx*(1-fy), wC=(1-fx)*fy, wD=fx*fy;
+      const p00=(by*W+bx)*4, p10=(by*W+bx2)*4;
+      const p01=(by2*W+bx)*4, p11=(by2*W+bx2)*4;
+      return [
+        data[p00]*wA+data[p10]*wB+data[p01]*wC+data[p11]*wD,
+        data[p00+1]*wA+data[p10+1]*wB+data[p01+1]*wC+data[p11+1]*wD,
+        data[p00+2]*wA+data[p10+2]*wB+data[p01+2]*wC+data[p11+2]*wD
+      ];
+    }
+
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        /* Barycentric coords in destination triangle */
+        const rx=px-dv2[0], ry=py-dv2[1];
+        const l0=(T11*rx - T01*ry)*idet;
+        const l1=(T00*ry - T10*rx)*idet;
+        const l2=1-l0-l1;
+        if (l0<-0.001||l1<-0.001||l2<-0.001) continue;
+
+        /* Map to source triangles using same barycentric coords */
+        const ax1=src1[0][0]*l0+src1[1][0]*l1+src1[2][0]*l2;
+        const ay1=src1[0][1]*l0+src1[1][1]*l1+src1[2][1]*l2;
+        const ax2=src2[0][0]*l0+src2[1][0]*l1+src2[2][0]*l2;
+        const ay2=src2[0][1]*l0+src2[1][1]*l1+src2[2][1]*l2;
+
+        const sx1c=Math.max(0,Math.min(W-1.001,ax1));
+        const sy1c=Math.max(0,Math.min(H-1.001,ay1));
+        const sx2c=Math.max(0,Math.min(W-1.001,ax2));
+        const sy2c=Math.max(0,Math.min(H-1.001,ay2));
+
+        const [r1,g1,b1] = bilin(d1, sx1c, sy1c);
+        const [r2,g2,b2] = bilin(d2, sx2c, sy2c);
+
+        const oi=(py*W+px)*4;
+        od[oi  ] = r1*ia + r2*alfa;
+        od[oi+1] = g1*ia + g2*alfa;
+        od[oi+2] = b1*ia + b2*alfa;
+        od[oi+3] = 255;
+      }
+    }
+  }
+
+  /* ── Main frame generator ─────────────────────────────────────────── */
+  async function generateFrames() {
+    const offA = document.createElement('canvas');
+    const offB = document.createElement('canvas');
+    offA.width = MW; offA.height = MH;
+    offB.width = MW; offB.height = MH;
+    const ctxA = offA.getContext('2d', { willReadFrequently: true });
+    const ctxB = offB.getContext('2d', { willReadFrequently: true });
+
+    const imgA = new Image(); imgA.src = S.images[0];
+    const imgB = new Image(); imgB.src = S.images[1];
+    let loaded = 0;
+
+    await new Promise(resolve => {
+      function onLoad() { if (++loaded >= 2) resolve(); }
+      imgA.onload = imgB.onload = onLoad;
+      if (imgA.complete) onLoad();
+      if (imgB.complete) onLoad();
+    });
+
+    ctxA.drawImage(imgA, 0, 0, MW, MH);
+    ctxB.drawImage(imgB, 0, 0, MW, MH);
+    const idA = ctxA.getImageData(0, 0, MW, MH);
+    const idB = ctxB.getImageData(0, 0, MW, MH);
+    const d1 = idA.data, d2 = idB.data;
+    const N = MW * MH;
+
+    /* ── Try facial landmark detection first ───────────────────────
+       DETECT ON LARGE CANVASES (fixed 2026-07-02): detection used to run
+       on the 320×186 work canvases where faces are far too small for
+       TinyFaceDetector — it silently failed and every face pair fell
+       back to optical flow (≈ a crossfade, "still flips like the flip
+       effect"). Detect at 640px with a bigger input size and a lower
+       threshold, then scale the landmarks down to work-canvas coords.  */
+    let pts1 = null, pts2 = null;
+    if (_faceApiReady && typeof faceapi !== 'undefined') {
+      showProgress(5, 'Detecting facial landmarks…');
+      await new Promise(r => setTimeout(r, 0));
+      try {
+        const DW = 640, DH = Math.round(DW * MH / MW);
+        const mkDet = img => {
+          const c = document.createElement('canvas'); c.width = DW; c.height = DH;
+          c.getContext('2d').drawImage(img, 0, 0, DW, DH);
+          return c;
+        };
+        const detCvsA = mkDet(imgA), detCvsB = mkDet(imgB);
+        const detOne = async cvs => {
+          if (_ssdReady) {
+            const d = await faceapi.detectSingleFace(cvs,
+              new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 })).withFaceLandmarks();
+            if (d) return d;
+          }
+          return faceapi.detectSingleFace(cvs,
+            new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.2 })).withFaceLandmarks();
+        };
+        const [detA, detB] = await Promise.all([ detOne(detCvsA), detOne(detCvsB) ]);
+        const hint = document.getElementById('previewHint');
+        if (detA && detB) {
+          const sx = MW / DW, sy = MH / DH;
+          pts1 = detA.landmarks.positions.map(p => [p.x * sx, p.y * sy]);
+          pts2 = detB.landmarks.positions.map(p => [p.x * sx, p.y * sy]);
+          console.log('[morph] landmarks detected — using Delaunay face morph');
+          if (hint) hint.textContent = 'Face morph: features aligned, morphing as the card tilts';
+        } else {
+          console.log('[morph] face not detected in one or both images — using optical flow');
+          if (hint) hint.textContent = 'Object morph (no faces detected): works best with similar-shaped subjects';
+        }
+      } catch(e) { console.warn('[morph] landmark detection error:', e); }
+    }
+
+    if (pts1 && pts2) {
+      /* ══ PATH A: Delaunay landmark morph (FantaMorph-quality) ════ */
+      showProgress(15, 'Building Delaunay mesh…');
+      await new Promise(r => setTimeout(r, 0));
+
+      /* Add boundary control points (same positions for both images) */
+      const BN = 6;
+      for (let i = 0; i <= BN; i++) {
+        const tx = i/BN * MW, ty = i/BN * MH;
+        pts1.push([tx,0],[tx,MH],[0,ty],[MW,ty]);
+        pts2.push([tx,0],[tx,MH],[0,ty],[MW,ty]);
+      }
+      /* Corner points */
+      const corners = [[0,0],[MW,0],[MW,MH],[0,MH]];
+      pts1.push(...corners); pts2.push(...corners);
+
+      /* Delaunay on midpoints for consistent topology */
+      const midPts = pts1.map((p,i) => [
+        (p[0]+pts2[i][0])/2, (p[1]+pts2[i][1])/2
+      ]);
+      const tris = delaunay(midPts);
+      console.log('[morph]', tris.length, 'triangles');
+
+      showProgress(20, 'Rendering ' + tris.length + ' triangles × ' + (FRAMES+1) + ' frames…');
+      await new Promise(r => setTimeout(r, 0));
+
+      const buildFrames = new Array(FRAMES + 1);
+      let f = 0;
+
+      function batchLandmark() {
+        const end = Math.min(f + 3, FRAMES + 1);
+        for (; f < end; f++) {
+          const alfa = f / FRAMES;
+          const outId = workCtx.createImageData(MW, MH);
+          const od    = outId.data;
+          /* Fill with black first */
+          for (let i = 3; i < od.length; i += 4) od[i] = 255;
+
+          /* Midpoint landmark positions for this alpha */
+          const ia = 1 - alfa;
+          const mPts = pts1.map((p,i) => [
+            p[0]*ia + pts2[i][0]*alfa,
+            p[1]*ia + pts2[i][1]*alfa
+          ]);
+
+          for (const [i0,i1,i2] of tris) {
+            rasterizeMorphTri(od, d1, d2, MW, MH,
+              [mPts[i0], mPts[i1], mPts[i2]],
+              [pts1[i0], pts1[i1], pts1[i2]],
+              [pts2[i0], pts2[i1], pts2[i2]],
+              alfa
+            );
+          }
+          buildFrames[f] = outId;
+        }
+        showProgress(Math.round(20 + (f/(FRAMES+1))*80),
+          'Landmark morph… ' + f + '/' + (FRAMES+1));
+        if (f <= FRAMES) setTimeout(batchLandmark, 0);
+        else {
+          morphFrames = buildFrames;
+        }
+      }
+      setTimeout(batchLandmark, 0);
+
+    } else {
+      /* ══ PATH B: Horn-Schunck optical flow (products / non-faces) ══ */
+
+      /* ── Optical-flow guided morphing ──────────────────────────────
+         Horn-Schunck dense optical flow: computes how every pixel
+         actually needs to move from image A to image B. The morph then
+         warps A forward and B backward by the computed field, meeting
+         at the midpoint — exactly as FantaMorph does internally.
+         Works perfectly for similar images (same subject, product, face).
+         ────────────────────────────────────────────────────────────── */
+
+      /* Step 1: grayscale */
+      const gray1 = new Float32Array(N);
+      const gray2 = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const p = i * 4;
+        gray1[i] = (d1[p]*0.299 + d1[p+1]*0.587 + d1[p+2]*0.114) / 255;
+        gray2[i] = (d2[p]*0.299 + d2[p+1]*0.587 + d2[p+2]*0.114) / 255;
+      }
+
+      /* Step 2: spatial + temporal gradients (central differences) */
+      const Ix = new Float32Array(N);
+      const Iy = new Float32Array(N);
+      const It = new Float32Array(N);
+      for (let y = 1; y < MH - 1; y++) {
+        for (let x = 1; x < MW - 1; x++) {
+          const i = y * MW + x;
+          Ix[i] = (gray1[i+1] - gray1[i-1] + gray2[i+1] - gray2[i-1]) * 0.25;
+          Iy[i] = (gray1[i+MW] - gray1[i-MW] + gray2[i+MW] - gray2[i-MW]) * 0.25;
+          It[i] = gray2[i] - gray1[i];
+        }
+      }
+
+      /* Step 3: Horn-Schunck iterations (Jacobi, batched for UI responsiveness)
+         λ² = 1.0 — strong smoothness so flow field is continuous across the image */
+      const lambda2 = 1.0;
+      const u = new Float32Array(N);
+      const v = new Float32Array(N);
+      const uBar = new Float32Array(N);
+      const vBar = new Float32Array(N);
+      let hsIter = 0;
+      const HS_ITERS = 150;
+
+      showProgress(5, 'Computing optical flow…');
+
+      function runHS() {
+        const batchEnd = Math.min(hsIter + 25, HS_ITERS);
+        for (; hsIter < batchEnd; hsIter++) {
+          /* Neighbourhood average (4-connected) */
+          for (let y = 0; y < MH; y++) {
+            for (let x = 0; x < MW; x++) {
+              const i = y * MW + x;
+              let su = 0, sv = 0, cnt = 0;
+              if (x > 0)      { su += u[i-1];  sv += v[i-1];  cnt++; }
+              if (x < MW-1)   { su += u[i+1];  sv += v[i+1];  cnt++; }
+              if (y > 0)      { su += u[i-MW]; sv += v[i-MW]; cnt++; }
+              if (y < MH-1)   { su += u[i+MW]; sv += v[i+MW]; cnt++; }
+              uBar[i] = cnt ? su / cnt : 0;
+              vBar[i] = cnt ? sv / cnt : 0;
+            }
+          }
+          /* Update rule */
+          for (let i = 0; i < N; i++) {
+            const P = Ix[i]*uBar[i] + Iy[i]*vBar[i] + It[i];
+            const D = lambda2 + Ix[i]*Ix[i] + Iy[i]*Iy[i];
+            u[i] = uBar[i] - Ix[i] * P / D;
+            v[i] = vBar[i] - Iy[i] * P / D;
+          }
+        }
+
+        showProgress(
+          Math.round(5 + (hsIter / HS_ITERS) * 15),
+          'Optical flow… ' + hsIter + ' / ' + HS_ITERS
+        );
+
+        if (hsIter < HS_ITERS) {
+          setTimeout(runHS, 0);
+        } else {
+          buildFramesPhase();
+        }
+      }
+      setTimeout(runHS, 0);
+
+      /* Step 4: smooth the flow, then build frames */
+      function buildFramesPhase() {
+        /* 3×3 box blur × 3 passes — removes high-frequency flow noise
+           while preserving large-scale warp structure */
+        function boxBlur(src) {
+          const dst = new Float32Array(N);
+          for (let y = 1; y < MH-1; y++) {
+            for (let x = 1; x < MW-1; x++) {
+              const i = y*MW+x;
+              dst[i] = (src[i-MW-1]+src[i-MW]+src[i-MW+1]+
+                        src[i-1]   +src[i]   +src[i+1]   +
+                        src[i+MW-1]+src[i+MW]+src[i+MW+1]) / 9;
+            }
+          }
+          /* Copy edges from src so borders are not zero */
+          for (let x = 0; x < MW; x++) { dst[x] = src[x]; dst[(MH-1)*MW+x] = src[(MH-1)*MW+x]; }
+          for (let y = 0; y < MH; y++) { dst[y*MW] = src[y*MW]; dst[y*MW+MW-1] = src[y*MW+MW-1]; }
+          return dst;
+        }
+        let su = boxBlur(boxBlur(boxBlur(u)));
+        let sv = boxBlur(boxBlur(boxBlur(v)));
+
+        showProgress(20, 'Building morph frames…');
+
+        const buildFrames = new Array(FRAMES + 1);
+        let f = 0;
+
+        function batch() {
+          const end = Math.min(f + 5, FRAMES + 1);
+          for (; f < end; f++) {
+            const alfa = f / FRAMES;   /* 0 = image A, 1 = image B */
+            const ia   = 1 - alfa;
+            const outId = workCtx.createImageData(MW, MH);
+            const od    = outId.data;
+
+            for (let py = 0; py < MH; py++) {
+              for (let px = 0; px < MW; px++) {
+                const i  = py * MW + px;
+                const fu = su[i], fv = sv[i];
+
+                /* Backward warp:
+                   img A pixel that maps to output (px,py) came from (px - alfa·u, py - alfa·v)
+                   img B pixel that maps to output (px,py) came from (px + ia·u,   py + ia·v)  */
+                const sx1 = Math.max(0, Math.min(MW-1.001, px - alfa * fu));
+                const sy1 = Math.max(0, Math.min(MH-1.001, py - alfa * fv));
+                const sx2 = Math.max(0, Math.min(MW-1.001, px + ia   * fu));
+                const sy2 = Math.max(0, Math.min(MH-1.001, py + ia   * fv));
+
+                /* Bilinear sample — img A */
+                const bx1=sx1|0, by1=sy1|0, fx1=sx1-bx1, fy1=sy1-by1;
+                const p00=(by1*MW+bx1)*4;
+                const wA=(1-fx1)*(1-fy1), wB=fx1*(1-fy1), wC=(1-fx1)*fy1, wD=fx1*fy1;
+                const r1=d1[p00]*wA+d1[p00+4]*wB+d1[p00+MW*4]*wC+d1[p00+MW*4+4]*wD;
+                const g1=d1[p00+1]*wA+d1[p00+5]*wB+d1[p00+MW*4+1]*wC+d1[p00+MW*4+5]*wD;
+                const b1=d1[p00+2]*wA+d1[p00+6]*wB+d1[p00+MW*4+2]*wC+d1[p00+MW*4+6]*wD;
+
+                /* Bilinear sample — img B */
+                const bx2=sx2|0, by2=sy2|0, fx2=sx2-bx2, fy2=sy2-by2;
+                const q00=(by2*MW+bx2)*4;
+                const vA=(1-fx2)*(1-fy2), vB=fx2*(1-fy2), vC=(1-fx2)*fy2, vD=fx2*fy2;
+                const r2=d2[q00]*vA+d2[q00+4]*vB+d2[q00+MW*4]*vC+d2[q00+MW*4+4]*vD;
+                const g2=d2[q00+1]*vA+d2[q00+5]*vB+d2[q00+MW*4+1]*vC+d2[q00+MW*4+5]*vD;
+                const b2=d2[q00+2]*vA+d2[q00+6]*vB+d2[q00+MW*4+2]*vC+d2[q00+MW*4+6]*vD;
+
+                const oi = i * 4;
+                od[oi  ] = r1*ia + r2*alfa;
+                od[oi+1] = g1*ia + g2*alfa;
+                od[oi+2] = b1*ia + b2*alfa;
+                od[oi+3] = 255;
+              }
+            }
+            buildFrames[f] = outId;
+          }
+
+          showProgress(
+            Math.round(20 + (f / (FRAMES+1)) * 80),
+            'Building frames… ' + f + ' / ' + (FRAMES+1)
+          );
+
+          if (f <= FRAMES) {
+            setTimeout(batch, 0);
+          } else {
+            /* All frames complete — atomic assignment so draw() never sees partial array */
+            morphFrames = buildFrames;
+          }
+        }
+        setTimeout(batch, 0);
+      }
+    }
+  }
+
+  setTimeout(generateFrames, 60);
+
+  /* ── frameFn — morph progress scrubbed by the card's real tilt ──
+     TRUE MORPH TIMING (fixed 2026-07-02): the morph sweeps GRADUALLY
+     across the ENTIRE tilt range — tilt −1 = pure A, tilt +1 = pure B,
+     every intermediate warped frame visible on the way (like a real
+     lenticular morph print changing with viewing angle). The previous
+     sigmoid centre-crossover zipped through the frames in a blink and
+     looked identical to the flip — the user rejected it. Do NOT put a
+     sigmoid back here; flip switches, morph sweeps.
+     While frames generate, image A shows tracked to the card. */
+  let paused = false, _morphT = 0;
+  S.frameFn = (now, tilt) => {
+    if (!morphFrames) return previewReady ? previewCvs : null;
+    const rawT  = (tilt + 1) / 2;                    /* full-range sweep  */
+    const lensT = rawT * rawT * (3 - 2 * rawT);      /* gentle ends       */
+    if (!paused) _morphT += (lensT - _morphT) * 0.15;
+    const fi = Math.max(0, Math.min(FRAMES, Math.round(_morphT * FRAMES)));
+    workCtx.putImageData(morphFrames[fi], 0, 0);
+    return workCvs;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: 3D Parallax (left-right only)
+   ═══════════════════════════════════════════════════════════════ */
+function renderThreed(cc) {
+  cc.classList.remove('card-tilting', 'card-tilting-ud');
+
+  /* Depth-map parallax, same engine as Layered 3D.
+     If the AI depth map isn't ready yet, render with a flat mid-grey
+     depth (image shows immediately, tracked to the card, no parallax)
+     and swap in the real depth map the moment generation finishes.   */
+  if (S.depthMaps[0]) {
+    renderDepthMap3d(cc);
+    return;
+  }
+
+  const flat = document.createElement('canvas');
+  flat.width = 8; flat.height = 8;
+  const fx = flat.getContext('2d');
+  fx.fillStyle = '#808080'; fx.fillRect(0, 0, 8, 8);
+  renderDepthMap3d(cc, flat.toDataURL());
+
+  generateDepthMap(S.images[0]).then(d => {
+    if (!d) return;
+    S.depthMaps[0] = d;
+    if (EFFECTS[S.effectIdx].id === 'threed') generatePreview();
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Layered 3D — depth-map driven per-pixel parallax
+   ─────────────────────────────────────────────────────────────
+   If S.depthMaps[0] is set: uses per-pixel displacement based
+   on the depth map. Each pixel shifts horizontally by:
+     shift = tiltX × depthNorm × MAX_PARALLAX_PX
+   where depthNorm = depthPixel/255 (white=near=shifts most).
+
+   Falls back to the old PSD-layer CSS parallax if no depth map.
+   ═══════════════════════════════════════════════════════════════ */
+function renderLayered3d(cc) {
+  cc.innerHTML = '';
+
+  /* TRUE layered 3D (rebuilt 2026-07-02, user requirement): needs a PSD
+     with each element on its own layer. Layers are depth planes drawn
+     back-to-front; each plane shifts horizontally with the card tilt at
+     a rate set by its depth — background one way, foreground the other,
+     the middle plane stable. This is how a real layered lenticular
+     (Triaxes-style) reads. NOT a depth-map effect — that's the 3D tab. */
+  const layers = S.psdLayers[0];
+  const { CW, CH } = cardSrcDims();
+  const work = document.createElement('canvas'); work.width = CW; work.height = CH;
+  const wctx = work.getContext('2d');
+
+  if (!layers || layers.length < 2) {
+    /* Flat image / single-layer PSD: show it tracked, tell the user why
+       there's no depth. Do not fake it with a depth map.               */
+    const hint = document.getElementById('previewHint');
+    if (hint) hint.textContent =
+      'Layered 3D needs a PSD with each element on its own layer. This file has only one layer, so it shows flat.';
+    let imgEl = null;
+    if (S.images[0]) { const i = new Image(); i.onload = () => { imgEl = i; }; i.src = S.images[0]; }
+    S.frameFn = () => {
+      if (!imgEl) return null;
+      wctx.clearRect(0, 0, CW, CH);
+      drawCover(wctx, imgEl, CW, CH);
+      return work;
+    };
+    return;
+  }
+
+  /* Load every layer at card size (same cover crop → planes stay aligned). */
+  const planes = layers.map(() => null);
+  layers.forEach((src, i) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = CW; c.height = CH;
+      drawCover(c.getContext('2d'), img, CW, CH);
+      planes[i] = c;
+    };
+    img.src = src;
+  });
+
+  const MAX_SEP = 48;          /* px between farthest and nearest plane at full tilt
+                                  (34 read too subtle — user 2026-07-02)            */
+  const OVERSCAN = 1.14;       /* covers the gap a shifted background would reveal   */
+  let curShift = 0, paused = false;
+  S.frameFn = (now, tilt) => {
+    if (!planes[0]) return null;
+    const N = planes.length;
+    const isUD = S.orientation === 'ud';
+    const t = Math.max(-1, Math.min(1, tilt * 0.85 + (isUD ? S.mouseY : S.mouseX) * 0.3));
+    if (!paused) curShift += (t * MAX_SEP - curShift) * 0.15;
+    wctx.clearRect(0, 0, CW, CH);
+    for (let i = 0; i < N; i++) {
+      const p = planes[i];
+      if (!p) continue;
+      const depth = i / (N - 1) - 0.5;        /* −0.5 back … +0.5 front */
+      const d = curShift * depth;
+      /* near planes also scale up a touch as they pop — stronger 3D read */
+      const sc = OVERSCAN * (1 + depth * 0.04 * Math.abs(curShift) / MAX_SEP);
+      wctx.save();
+      wctx.translate(CW / 2 + (isUD ? 0 : d), CH / 2 + (isUD ? d : 0));
+      wctx.scale(sc, sc);
+      wctx.drawImage(p, -CW / 2, -CH / 2);
+      wctx.restore();
+    }
+    return work;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ── Depth-map parallax (WebGL) — GPU per-pixel parallax ─────────────────
+   GPU upgrade of the old CPU single-tap map. A fragment shader solves the
+   backward parallax sample by fixed-point iteration:
+       uv' = uv − P · height(uv')   (near = white = height 1 → shifts most)
+   8 refinement taps resolve occlusion at depth edges (no smearing) and the
+   sample is bilinear at full 640×363, so silhouettes stay crisp where the
+   1-tap nearest CPU map smeared. Output is warped onto the tracked quad by
+   the unified compositor, exactly like every other effect, so the parallax
+   stays locked to the placeholder. Falls back to the CPU map if a browser
+   has no WebGL.                                                            */
+
+let _glDepth = null;   /* singleton GL renderer — reused so we never leak contexts */
+
+function _initGLDepth() {
+  if (_glDepth !== null) return _glDepth || null;   /* null = tried & failed */
+  const cvs = document.createElement('canvas');
+  cvs.width = 640; cvs.height = 363;
+  const opts = { preserveDrawingBuffer: true, alpha: true, premultipliedAlpha: false, antialias: true };
+  const gl = cvs.getContext('webgl', opts) || cvs.getContext('experimental-webgl', opts);
+  if (!gl) { _glDepth = false; return null; }
+
+  const vsSrc = 'attribute vec2 aPos; varying vec2 vUv;' +
+    'void main(){ vUv = aPos*0.5 + 0.5; gl_Position = vec4(aPos,0.0,1.0); }';
+  const fsSrc = [
+    'precision highp float;',
+    'varying vec2 vUv;',
+    'uniform sampler2D uImg;',
+    'uniform sampler2D uDepth;',
+    'uniform vec2 uShift;',                  /* parallax offset in uv units */
+    'uniform float uInset;',                 /* 1 − 2·HEIGHT: keeps samples inside the image */
+    'const int N = 12;',
+    'void main(){',
+    /* Inset the base UV so no shifted sample can leave the image — this is
+       what removes the smeared/stretched EDGES in the corners at full tilt
+       (CLAMP_TO_EDGE used to repeat the border pixels there).             */
+    '  vec2 base = 0.5 + (vUv - 0.5) * uInset;',
+    /* CENTRED depth parallax (user-confirmed 2026-07-02: BOTH move):
+       the card plane sits at MID depth. Foreground (near, h=1) shifts
+       +0.5·shift — comes OUT in 3D space — while the background (far,
+       h=0) shifts −0.5·shift — pushed BACK. Equal counter-motion around
+       the card plane (verified: interior markers +21px / −21.5px).
+       Solved by DAMPED fixed-point iteration of
+       uv = base − (h(uv) − 0.5)·shift; the heavily blurred depth map
+       keeps the iteration convergent (do not remove blur or damping). */
+    '  vec2 uv = base;',
+    '  for(int i=0;i<N;i++){',
+    '    float h = texture2D(uDepth, uv).r;',      /* 1 = near */
+    '    vec2 target = base - (h - 0.5) * uShift;',
+    '    uv = mix(uv, target, 0.6);',              /* damping: stable at ramps */
+    '  }',
+    '  gl_FragColor = texture2D(uImg, uv);',
+    '}'
+  ].join('\n');
+
+  const sh = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error('[glDepth] shader', gl.getShaderInfoLog(s)); return null;
+    }
+    return s;
+  };
+  const vsh = sh(gl.VERTEX_SHADER, vsSrc), fsh = sh(gl.FRAGMENT_SHADER, fsSrc);
+  if (!vsh || !fsh) { _glDepth = false; return null; }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vsh); gl.attachShader(prog, fsh); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error('[glDepth] link', gl.getProgramInfoLog(prog)); _glDepth = false; return null;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);   /* keep the image upright */
+  const mkTex = () => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    return t;
+  };
+  const texImg = mkTex(), texDep = mkTex();
+  gl.uniform1i(gl.getUniformLocation(prog, 'uImg'), 0);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uDepth'), 1);
+
+  _glDepth = {
+    cvs, gl, prog,
+    uShift: gl.getUniformLocation(prog, 'uShift'),
+    uInset: gl.getUniformLocation(prog, 'uInset'),
+    texImg, texDep
+  };
+  return _glDepth;
+}
+
+function renderDepthMap3d(cc, depthSrc) {
+  depthSrc = depthSrc || S.depthMaps[0];
+  cc.innerHTML = '';
+
+  const G = _initGLDepth();
+  if (!G) { renderDepthMap3dCPU(cc, depthSrc); return; }   /* no WebGL → CPU */
+  const gl = G.gl;
+  const { CW, CH } = cardSrcDims();
+  /* resize the singleton GL canvas to match the card aspect (portrait) */
+  if (G.cvs.width !== CW)  G.cvs.width  = CW;
+  if (G.cvs.height !== CH) G.cvs.height = CH;
+
+  let ready = false;
+  (async () => {
+    const loadImg = src => new Promise(res => {
+      const img = new Image(); img.onload = () => res(img); img.src = src;
+      if (img.complete) res(img);
+    });
+    const [img, dmap] = await Promise.all([ loadImg(S.images[0]), loadImg(depthSrc) ]);
+    const ic = document.createElement('canvas'); ic.width = CW; ic.height = CH;
+    drawCover(ic.getContext('2d'), img, CW, CH);
+    /* Depth map: same cover crop → aligned, then HEAVILY blurred (24px).
+       The blur radius must exceed the max pixel displacement (~22px), or
+       the fixed-point solve oscillates at silhouette edges and PINS them
+       in place (weak "content-slide" 3D, plus the smearing streaks the
+       user photographed). A wide ramp makes the warp smooth: foreground
+       pops, background recedes, edges bend cleanly — the same trick the
+       LeiaPix-style depth animators use. Do NOT reduce below ~24px.     */
+    const dc = document.createElement('canvas'); dc.width = CW; dc.height = CH;
+    const dctx = dc.getContext('2d');
+    dctx.filter = 'blur(28px)';
+    drawCover(dctx, dmap, CW, CH);
+    dctx.filter = 'none';
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.texImg);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ic);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, G.texDep);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dc);
+    ready = true;
+  })();
+
+  const HEIGHT = 0.05;            /* max parallax as a fraction of card width.
+                                     0.035 read too subtle; 0.05 works because
+                                     the centred warp splits it ±half and the
+                                     28px depth blur exceeds the per-side
+                                     displacement (16px) — no smearing        */
+  let curX = 0, curY = 0, paused = false;
+  S.frameFn = (now, tilt) => {
+    if (!ready) return null;
+    /* the card's rock drives the parallax along its own axis:
+       LR video → horizontal, UD video → vertical (mouse adds the other) */
+    const isUD = S.orientation === 'ud';
+    const tx = Math.max(-1, Math.min(1, (isUD ? 0 : tilt * 0.85) + S.mouseX * 0.3));
+    const ty = Math.max(-1, Math.min(1, (isUD ? tilt * 0.85 : 0) + S.mouseY * 0.5));
+    if (!paused) { curX += (tx - curX) * 0.15; curY += (ty - curY) * 0.15; }
+    gl.useProgram(G.prog);
+    gl.uniform2f(G.uShift, curX * HEIGHT, curY * HEIGHT);
+    gl.uniform1f(G.uInset, 1.0 - 3.0 * HEIGHT);   /* march + centring headroom */
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.texImg);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, G.texDep);
+    gl.viewport(0, 0, CW, CH);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    return G.cvs;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* CPU fallback — original 1-tap backward map (used only when WebGL absent). */
+function renderDepthMap3dCPU(cc, depthSrc) {
+  depthSrc = depthSrc || S.depthMaps[0];
+  cc.innerHTML = '';
+
+  const { CW: _dW, CH: _dH } = cardSrcDims();
+  const MW = Math.round(_dW / 2), MH = Math.round(_dH / 2);
+  const workCvs = document.createElement('canvas');
+  workCvs.width = MW; workCvs.height = MH;
+  const workCtx = workCvs.getContext('2d');
+  const MAX_SHIFT = 22;
+
+  let imgData = null, depthData = null, assetsReady = false;
+  (async () => {
+    const loadImg = src => new Promise(res => {
+      const img = new Image(); img.onload = () => res(img); img.src = src;
+      if (img.complete) res(img);
+    });
+    const [img, dmap] = await Promise.all([ loadImg(S.images[0]), loadImg(depthSrc) ]);
+    const ta = document.createElement('canvas'); ta.width=MW; ta.height=MH;
+    const ca = ta.getContext('2d', { willReadFrequently: true });
+    drawCover(ca, img, MW, MH);
+    imgData = ca.getImageData(0, 0, MW, MH);
+    const td = document.createElement('canvas'); td.width=MW; td.height=MH;
+    const cd = td.getContext('2d', { willReadFrequently: true });
+    cd.drawImage(dmap, 0, 0, MW, MH);
+    depthData = cd.getImageData(0, 0, MW, MH);
+    assetsReady = true;
+  })();
+
+  let curShift = 0, paused = false;
+  S.frameFn = (now, tilt) => {
+    if (!assetsReady) return null;
+    const tiltX = Math.max(-1, Math.min(1, tilt * 0.85 + S.mouseX * 0.3));
+    if (!paused) curShift += (tiltX * MAX_SHIFT - curShift) * 0.15;
+    const out = workCtx.createImageData(MW, MH);
+    const od = out.data, sd = imgData.data, dd = depthData.data;
+    for (let y = 0; y < MH; y++) {
+      for (let x = 0; x < MW; x++) {
+        const i   = (y * MW + x) * 4;
+        const dep = dd[i] / 255;                       /* 0=far, 1=near */
+        const sx  = Math.max(0, Math.min(MW - 1, (x - curShift * dep + 0.5) | 0));
+        const si  = (y * MW + sx) * 4;
+        od[i] = sd[si]; od[i+1] = sd[si+1]; od[i+2] = sd[si+2]; od[i+3] = 255;
+      }
+    }
+    workCtx.putImageData(out, 0, 0);
+    return workCvs;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Animation — PSD layers scrub with the card tilt
+   ═══════════════════════════════════════════════════════════════ */
+function renderAnimation(cc) {
+  cc.innerHTML = '';
+  const layers = (S.psdLayers[0] && S.psdLayers[0].length > 1) ? S.psdLayers[0] : [S.images[0]];
+  const { CW, CH } = cardSrcDims();
+
+  const frames = layers.map(() => null);
+  layers.forEach((src, i) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = CW; c.height = CH;
+      drawCover(c.getContext('2d'), img, CW, CH);
+      frames[i] = c;
+    };
+    img.src = src;
+  });
+
+  let _fi = 0, paused = false;
+  S.frameFn = (now, tilt) => {
+    const N = frames.length;
+    if (N === 0 || !frames[0]) return null;
+    const rawT  = (tilt + 1) / 2;
+    const lensT = rawT * rawT * (3 - 2 * rawT);
+    if (!paused) _fi += (lensT * (N - 1) - _fi) * 0.15;
+    const fi = Math.max(0, Math.min(N - 1, Math.round(_fi)));
+    return frames[fi] || frames[0];
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Zoom — zoom level follows the viewing angle
+   ─────────────────────────────────────────────────────────────
+   Professional zoom PSDs (verified against TwenT3's PSD FILES
+   library 2026-07-02, e.g. "Zoom truck", "Camera Zoom") contain
+   ~12 pre-rendered layers — the SAME artwork at progressive zoom
+   steps, focal element growing while the background holds. So a
+   multi-layer PSD is scrubbed layer-by-layer with the tilt, just
+   like the pros built it. A plain image falls back to a simple
+   programmatic whole-image zoom.
+   ═══════════════════════════════════════════════════════════════ */
+function renderZoom(cc) {
+  cc.innerHTML = '';
+  const { CW, CH } = cardSrcDims();
+  const work = document.createElement('canvas'); work.width = CW; work.height = CH;
+  const wctx = work.getContext('2d');
+
+  const layers = S.psdLayers[0];
+  if (layers && layers.length > 1) {
+    /* PSD route: scrub the pre-rendered zoom steps with the tilt */
+    const frames = layers.map(() => null);
+    layers.forEach((src, i) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas'); c.width = CW; c.height = CH;
+        drawCover(c.getContext('2d'), img, CW, CH);
+        frames[i] = c;
+      };
+      img.src = src;
+    });
+    let _fi = 0, paused = false;
+    S.frameFn = (now, tilt) => {
+      const N = frames.length;
+      if (!frames[0]) return null;
+      const rawT  = (tilt + 1) / 2;
+      const lensT = rawT * rawT * (3 - 2 * rawT);
+      if (!paused) _fi += (lensT * (N - 1) - _fi) * 0.15;
+      const fi = Math.max(0, Math.min(N - 1, Math.round(_fi)));
+      return frames[fi] || frames[0];
+    };
+    addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+    return;
+  }
+
+  /* Single image route: programmatic whole-image zoom */
+  let imgEl = null;
+  { const i = new Image(); i.onload = () => { imgEl = i; }; i.src = S.images[0]; }
+
+  let _zoom = 1, paused = false;
+  S.frameFn = (now, tilt) => {
+    if (!imgEl) return null;
+    const target = 1 + 0.35 * (tilt + 1) / 2;   /* 1.0 → 1.35 across the rock */
+    if (!paused) _zoom += (target - _zoom) * 0.12;
+    wctx.clearRect(0, 0, CW, CH);
+    wctx.save();
+    wctx.translate(CW / 2, CH / 2);
+    wctx.scale(_zoom, _zoom);
+    wctx.translate(-CW / 2, -CH / 2);
+    drawCover(wctx, imgEl, CW, CH);
+    wctx.restore();
+    return work;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Stereoscopic — red-cyan anaglyph, tracked to the card
+   ═══════════════════════════════════════════════════════════════ */
+function renderStereoscopic(cc) {
+  cc.innerHTML = '';
+
+  /* TRUE lenticular stereo pair (corrected 2026-07-02, user spec):
+     NO glasses, NO anaglyph. Image 1 = left view, Image 2 = right view,
+     shot slightly offset. On the real lenticular print each viewing
+     angle shows one of the views — so here the card tilt sweeps between
+     the two views across the rock. The motion parallax between the
+     offset views is what reads as 3D, exactly like the physical card. */
+  const { CW, CH } = cardSrcDims();
+  const offL = document.createElement('canvas'); offL.width = CW; offL.height = CH;
+  const offR = document.createElement('canvas'); offR.width = CW; offR.height = CH;
+  const work = document.createElement('canvas'); work.width = CW; work.height = CH;
+  const wctx = work.getContext('2d');
+  let ready = false;
+
+  (async () => {
+    const loadImg = src => new Promise(res => {
+      const img = new Image(); img.onload = () => res(img); img.src = src;
+      if (img.complete) res(img);
+    });
+    const [imgL, imgR] = await Promise.all([ loadImg(S.images[0]), loadImg(S.images[1]) ]);
+    drawCover(offL.getContext('2d'), imgL, CW, CH);
+    drawCover(offR.getContext('2d'), imgR, CW, CH);
+    ready = true;
+  })();
+
+  let _t = 0.5, paused = false;
+  S.frameFn = (now, tilt) => {
+    if (!ready) return null;
+    /* tilt −1 = pure left view, +1 = pure right view, smooth sweep */
+    const rawT  = (tilt + 1) / 2;
+    const lensT = rawT * rawT * (3 - 2 * rawT);
+    if (!paused) _t += (lensT - _t) * 0.2;
+    const a = Math.max(0, Math.min(1, _t));
+    wctx.clearRect(0, 0, CW, CH);
+    wctx.globalAlpha = 1;  wctx.drawImage(offL, 0, 0);
+    if (a > 0.002) { wctx.globalAlpha = a; wctx.drawImage(offR, 0, 0); wctx.globalAlpha = 1; }
+    return work;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FILE HANDLING
+   ═══════════════════════════════════════════════════════════════ */
+async function handleFile(file, idx) {
+  if (!file) return;
+  const zone = document.getElementById('zone' + idx);
+  if (zone) zone.style.opacity = '.5';
+
+  /* Big library PSDs run to 130+ MB and take several seconds to parse —
+     show progress so it doesn't read as "not loading" (user 2026-07-02). */
+  const zoneLbl = zone ? zone.querySelector('.upload-label-text') : null;
+  const zoneLblOld = zoneLbl ? zoneLbl.innerHTML : '';
+  const isPsd = file.name.toLowerCase().endsWith('.psd');
+  if (zoneLbl && isPsd) zoneLbl.innerHTML =
+    '<strong>Parsing PSD…</strong> (' + Math.max(1, Math.round(file.size/1048576)) + ' MB, a few seconds)';
+
+  const psdResult = await parsePSD(file);
+  if (zoneLbl) zoneLbl.innerHTML = zoneLblOld;
+  if (psdResult) {
+    S.images[idx]    = psdResult.flat;
+    S.psdLayers[idx] = psdResult.layers;
+  } else if (file.type.startsWith('image/') || !file.name.toLowerCase().endsWith('.psd')) {
+    await new Promise(res => {
+      const r = new FileReader();
+      r.onload = ev => {
+        S.images[idx]    = ev.target.result;
+        S.psdLayers[idx] = [ev.target.result];
+        res();
+      };
+      r.readAsDataURL(file);
+    });
+  } else if (typeof AgPsd === 'undefined') {
+    alert('The PSD reader failed to load with the page. Refresh the page (Ctrl+F5) and try again.');
+  } else {
+    alert('This PSD could not be read (it may use a feature the reader does not support). ' +
+          'Try re-saving it in Photoshop with Maximize Compatibility on, or upload a PNG/JPG.');
+  }
+
+  if (zone) zone.style.opacity = '1';
+  /* ── Two-slot PSD auto-split (2026-07-02) ────────────────────────────
+     Professional 2-image PSDs hold both images as two layers in ONE file
+     (verified in the TwenT3 library: flip PSDs = image A + image B,
+     "Stereoscopic 3D for website.psd" = left view + right view). For any
+     two-image effect (flip, morph, stereoscopic), dropping such a PSD on
+     either slot fills BOTH slots from its first two layers.            */
+  const curEff = EFFECTS[S.effectIdx];
+  if (curEff.numImages === 2 &&
+      S.psdLayers[idx] && S.psdLayers[idx].length >= 2) {
+    S.images[0]    = S.psdLayers[idx][0];
+    S.images[1]    = S.psdLayers[idx][1];
+    S.psdLayers[0] = [S.images[0]];
+    S.psdLayers[1] = [S.images[1]];
+  }
+
+  /* Auto-select Portrait fit when the first upload is a portrait image
+     (taller than wide) so customers see the whole photo un-cropped.    */
+  if (idx === 0 && S.images[0]) {
+    try {
+      const probe = new Image();
+      probe.onload = () => {
+        const fit = probe.naturalHeight > probe.naturalWidth ? 'portrait' : 'landscape';
+        if (fit !== S.cardFit) {
+          S.cardFit = fit;
+          document.querySelectorAll('#fitBar .orient-btn').forEach(b =>
+            b.classList.toggle('active', b.dataset.fit === fit));
+        }
+      };
+      probe.src = S.images[0];
+    } catch (e) {}
+  }
+
+  updateThumbs();
+  checkReady();
+
+  /* ── Auto-generate depth map for 3D ──────────────────────────────────
+     As soon as the customer uploads their image we kick off AI depth
+     estimation in the background.  No button click needed.             */
+  if (curEff.id === 'threed' &&
+      idx === 0 && S.images[0] && !S.depthMaps[0]) {
+    _autoDepth();
+  }
+}
+
+function updateThumbs() {
+  const row = document.getElementById('thumbRow');
+  if (!row) return;
+  row.innerHTML = '';
+  S.images.forEach((src, i) => {
+    if (!src) return;
+    const d = document.createElement('div');
+    d.className = 'thumb';
+    const lc = (S.psdLayers[i] || []).length;
+    const badge = lc > 1 ? `<div style="position:absolute;bottom:2px;left:2px;background:var(--green);color:#fff;font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;">${lc}L</div>` : '';
+    d.innerHTML = `<img src="${src}"/><button class="rm">✕</button>${badge}`;
+    d.querySelector('.rm').onclick = () => { S.images[i]=null; S.psdLayers[i]=[]; updateThumbs(); checkReady(); };
+    row.appendChild(d);
+  });
+}
+
+function checkReady() {
+  const eff = EFFECTS[S.effectIdx];
+  const btn = document.getElementById('btnGenerate');
+  if (btn) {
+    if (eff.id === 'sequence') {
+      btn.disabled = S.seqFrames.length === 0;
+    } else {
+      btn.disabled = S.images.filter(Boolean).length < eff.numImages;
+    }
+  }
+  /* Enable depth-gen button when image 0 is ready */
+  const depthBtn = document.getElementById('btnDepthGen');
+  if (depthBtn) depthBtn.disabled = !S.images[0];
+}
+
+/* ── Auto depth — runs silently in the background after image upload ── */
+async function _autoDepth() {
+  const status = document.getElementById('depthStatus');
+  const btn    = document.getElementById('btnDepthGen');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+  if (status) { status.className = 'depth-status'; status.textContent = 'Auto-generating depth map…'; }
+
+  const result = await generateDepthMap(S.images[0]);
+  if (result) {
+    S.depthMaps[0] = result;
+    setDepthMapUI(result);
+    if (status) { status.className = 'depth-status ok'; status.textContent = '✓ Depth map ready'; }
+  } else {
+    if (status) { status.className = 'depth-status'; status.textContent = 'Auto depth failed — upload a depth map or retry'; }
+  }
+  if (btn) { btn.disabled = !S.images[0]; btn.textContent = '🤖 AI Generate Depth'; }
+  checkReady();
+}
+
+/* alias used in depth section */
+function updateGenerateBtn() { checkReady(); }
+
+/* ═══════════════════════════════════════════════════════════════
+   BUILD UPLOAD PANEL + EFFECT SELECTOR
+   ═══════════════════════════════════════════════════════════════ */
+function buildUploadPanel() {
+  const eff = EFFECTS[S.effectIdx];
+  S.images    = [];
+  S.psdLayers = [];
+  S.depthMaps = [];
+  S.seqFrames = [];
+
+  uploadPanel.innerHTML = `
+    <div>
+      <div class="section-label" style="margin-bottom:.55rem;">Select Effect</div>
+      <div class="effect-grid" id="effectGrid"></div>
+    </div>
+
+    <div style="border-top:1px solid var(--dark-4);padding-top:.85rem;">
+      <div class="section-label">${eff.icon} Active Effect</div>
+      <div class="effect-headline" style="margin:.35rem 0 .4rem;">${eff.name}</div>
+      <div class="effect-desc">${eff.desc}</div>
+    </div>
+
+    <div id="uploadZones"></div>
+    <div class="thumb-row" id="thumbRow"></div>
+
+    <div class="info-card">
+      <div class="info-card-title">📋 How to use</div>
+      <div id="stepsEl"></div>
+    </div>
+    <div class="tip-box">
+      <strong>💡 Pro Tips</strong>
+      <span id="tipsEl"></span>
+    </div>
+    <button class="btn-generate" id="btnGenerate" disabled>✨ Generate Preview</button>`;
+
+  /* Effect selector grid */
+  const grid = document.getElementById('effectGrid');
+  EFFECTS.forEach((e, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'effect-btn' + (i === S.effectIdx ? ' active' : '');
+    btn.innerHTML = `<span class="btn-icon">${e.icon}</span>${e.name}`;
+    btn.onclick   = () => selectEffect(i);
+    grid.appendChild(btn);
+  });
+
+  /* Steps & tips */
+  eff.steps.forEach((s, i) => {
+    document.getElementById('stepsEl').innerHTML +=
+      `<div class="step"><div class="step-num">${i+1}</div><div>${s}</div></div>`;
+  });
+  document.getElementById('tipsEl').innerHTML = '• ' + eff.tips.join('<br>• ');
+
+  /* Upload zones */
+  const zonesEl = document.getElementById('uploadZones');
+  eff.imgLabels.forEach((lbl, idx) => {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="upload-zone-title">${lbl}</div>
+      <div class="upload-zone" id="zone${idx}">
+        <input type="file" accept="${eff.accept[idx] || 'image/*'}" />
+        <div class="upload-icon">${eff.psd ? '🗂️' : '📁'}</div>
+        <div class="upload-label-text"><strong>Choose file</strong> or drag & drop</div>
+        ${eff.psd ? '<div class="psd-badge">PSD Recommended</div>' : ''}
+        <div class="upload-hint">${(eff.accept[idx] || '').includes('.psd') || eff.psd ? 'PSD · PNG · JPG · WEBP' : 'PNG · JPG · WEBP'}</div>
+      </div>`;
+    zonesEl.appendChild(wrap);
+
+    const input   = wrap.querySelector('input');
+    const zoneDiv = wrap.querySelector('.upload-zone');
+    input.addEventListener('change', e => handleFile(e.target.files[0], idx));
+    zoneDiv.addEventListener('dragover',  ev => { ev.preventDefault(); zoneDiv.classList.add('drag-over'); });
+    zoneDiv.addEventListener('dragleave', ()  => zoneDiv.classList.remove('drag-over'));
+    zoneDiv.addEventListener('drop', ev => {
+      ev.preventDefault(); zoneDiv.classList.remove('drag-over');
+      if (ev.dataTransfer.files[0]) handleFile(ev.dataTransfer.files[0], idx);
+    });
+  });
+
+  document.getElementById('btnGenerate').onclick = generatePreview;
+
+  /* ── Depth map section — only for 3D (depth-map parallax).
+        Layered 3D no longer uses depth maps — it's PSD layer planes. ── */
+  if (eff.id === 'threed') {
+    buildDepthSection();
+  }
+
+  /* ── Frame sequence drop zone — only for Sequence effect ──── */
+  if (eff.id === 'sequence') {
+    buildSeqDropZone();
+  }
+}
+
+/* ── Build the depth map upload/generate UI ──────────────────── */
+function buildDepthSection() {
+  /* Insert after thumbRow */
+  const thumbRow = document.getElementById('thumbRow');
+  const sec = document.createElement('div');
+  sec.className = 'depth-section';
+  sec.id = 'depthSection';
+  sec.innerHTML = `
+    <div class="section-label">🗺 Depth Map</div>
+
+    <div class="depth-drop-zone${S.depthMaps[0] ? ' has-map' : ''}" id="depthDropZone">
+      ${S.depthMaps[0]
+        ? `<img class="depth-map-thumb" id="depthThumbImg" src="${S.depthMaps[0]}" alt="depth map" />`
+        : `<span class="depth-drop-icon">🌑</span>`}
+      <div class="depth-drop-text">
+        <strong>${S.depthMaps[0] ? 'Depth map loaded' : 'Upload depth map'}</strong><br>
+        Greyscale PNG — white=near, black=far
+      </div>
+      <input type="file" id="depthFileInput" accept="image/*" style="display:none" />
+    </div>
+
+    <div class="depth-api-row">
+      <button class="btn-depth-gen" id="btnDepthGen"
+              ${S.images[0] ? '' : 'disabled'}>
+        🤖 AI Generate Depth
+      </button>
+    </div>
+    <div class="depth-status" id="depthStatus">
+      ${S.depthMaps[0] ? '✓ Depth map ready' : 'Upload a depth map or click AI Generate Depth'}
+    </div>`;
+
+  thumbRow.insertAdjacentElement('afterend', sec);
+
+  /* Depth file upload */
+  const depthDrop  = document.getElementById('depthDropZone');
+  const depthInput = document.getElementById('depthFileInput');
+
+  depthDrop.addEventListener('click', () => depthInput.click());
+  depthDrop.addEventListener('dragover',  e => { e.preventDefault(); depthDrop.classList.add('drag-over'); });
+  depthDrop.addEventListener('dragleave', ()  => depthDrop.classList.remove('drag-over'));
+  depthDrop.addEventListener('drop', e => {
+    e.preventDefault(); depthDrop.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) handleDepthFile(e.dataTransfer.files[0]);
+  });
+  depthInput.addEventListener('change', e => {
+    if (e.target.files[0]) handleDepthFile(e.target.files[0]);
+  });
+
+  /* AI generate button */
+  document.getElementById('btnDepthGen').addEventListener('click', async () => {
+    if (!S.images[0]) return;
+    const btn    = document.getElementById('btnDepthGen');
+    const status = document.getElementById('depthStatus');
+    btn.disabled = true;
+    btn.textContent = '⏳ Loading…';
+    status.className = 'depth-status';
+    status.textContent = 'Starting AI depth estimator…';
+
+    const result = await generateDepthMap(S.images[0]);
+    if (result) {
+      S.depthMaps[0] = result;
+      setDepthMapUI(result);
+      status.className = 'depth-status ok';
+      status.textContent = '✓ Depth map generated by AI';
+    } else {
+      status.className = 'depth-status err';
+      status.textContent = '✗ AI generation failed — try uploading a depth map manually';
+    }
+    btn.disabled = !S.images[0];
+    btn.textContent = '🤖 AI Generate Depth';
+    updateGenerateBtn();
+  });
+}
+
+function handleDepthFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    S.depthMaps[0] = e.target.result;
+    setDepthMapUI(e.target.result);
+    const status = document.getElementById('depthStatus');
+    if (status) { status.className = 'depth-status ok'; status.textContent = '✓ Depth map loaded'; }
+    updateGenerateBtn();
+  };
+  reader.readAsDataURL(file);
+}
+
+function setDepthMapUI(dataUrl) {
+  const zone = document.getElementById('depthDropZone');
+  if (!zone) return;
+  zone.classList.add('has-map');
+  /* Show thumbnail */
+  let thumb = document.getElementById('depthThumbImg');
+  if (!thumb) {
+    /* Remove icon if present */
+    const icon = zone.querySelector('.depth-drop-icon');
+    if (icon) icon.remove();
+    thumb = document.createElement('img');
+    thumb.id = 'depthThumbImg';
+    thumb.className = 'depth-map-thumb';
+    thumb.alt = 'depth map';
+    zone.insertAdjacentElement('afterbegin', thumb);
+  }
+  thumb.src = dataUrl;
+  const txt = zone.querySelector('.depth-drop-text strong');
+  if (txt) txt.textContent = 'Depth map loaded';
+}
+
+/* ── AI Depth Map — powered by Depth Anything v2 (transformers.js) ────
+   Runs entirely in the browser via ONNX/WebAssembly.
+   First use downloads ~30 MB model (cached permanently after that).
+   Output: white = near, black = far (matches sculptok.com convention).  */
+
+async function generateDepthMap(imageDataUrl) {
+  const statusEl = document.getElementById('depthStatus');
+  const setStatus = t => { if (statusEl) { statusEl.className = 'depth-status'; statusEl.textContent = t; } };
+
+  try {
+    /* ── 1. Lazy-load transformers.js (ES module via dynamic import) ── */
+    if (!window._depthPipe) {
+      setStatus('Loading AI depth model (first use downloads ~30 MB)…');
+      let transformers;
+      try {
+        transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2');
+      } catch(e) {
+        /* Fallback to older @xenova bundle */
+        transformers = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+      }
+      const { pipeline, env } = transformers;
+      if (env) { env.allowRemoteModels = true; env.allowLocalModels = false; }
+
+      const MODEL = 'onnx-community/depth-anything-v2-small';
+      setStatus('Downloading model weights — this only happens once…');
+      window._depthPipe = await pipeline('depth-estimation', MODEL, {
+        dtype: 'fp32',
+        progress_callback: p => {
+          if (p.status === 'progress')
+            setStatus(`Downloading model: ${Math.round(p.progress || 0)}%`);
+          else if (p.status === 'ready')
+            setStatus('Model ready — running inference…');
+        }
+      });
+    }
+
+    /* ── 2. Run inference ─────────────────────────────────────────── */
+    setStatus('Estimating depth…');
+    /* Pipeline accepts a URL string; turn the data URL into an object URL */
+    const blob    = await fetch(imageDataUrl).then(r => r.blob());
+    const objUrl  = URL.createObjectURL(blob);
+    const result  = await window._depthPipe(objUrl);
+    URL.revokeObjectURL(objUrl);
+
+    /* ── 3. Extract depth image ────────────────────────────────────
+       result.depth  — RawImage (grayscale, uint8, channels 1 or 3)
+       Depth Anything v2: high value = close to camera (disparity).
+       We render white=near which is already what the model provides.  */
+    const depth = result.depth;
+    const W = depth.width, H = depth.height;
+    const ch  = depth.channels || 1;  /* 1=grayscale, 3=RGB */
+    const src = depth.data;           /* Uint8ClampedArray or similar */
+
+    /* ── 4. Convert to greyscale canvas PNG ──────────────────────── */
+    const cvs = document.createElement('canvas');
+    cvs.width = W; cvs.height = H;
+    const ctx  = cvs.getContext('2d');
+    const idat = ctx.createImageData(W, H);
+    const dst  = idat.data;
+
+    for (let i = 0; i < W * H; i++) {
+      const v = src[i * ch];   /* first channel = greyscale value */
+      dst[i*4]   = v;
+      dst[i*4+1] = v;
+      dst[i*4+2] = v;
+      dst[i*4+3] = 255;
+    }
+    ctx.putImageData(idat, 0, 0);
+    setStatus('✓ Depth map generated');
+    return cvs.toDataURL('image/png');
+
+  } catch(e) {
+    console.error('[depth AI]', e);
+    setStatus('✗ Depth generation failed: ' + (e.message || e));
+    return null;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FRAME SEQUENCE — drop zone + loader + renderer
+   ─────────────────────────────────────────────────────────────
+   Accepts:  multi-file PNG/JPG drop/select  OR  ZIP archive
+   Stores:   S.seqFrames[] = sorted data URLs (max 60 subsampled)
+   Renders:  per-frame perspectiveDraw synced to tilt angle
+   ═══════════════════════════════════════════════════════════════ */
+
+function buildSeqDropZone() {
+  const zonesEl = document.getElementById('uploadZones');
+  if (!zonesEl) return;
+
+  const div = document.createElement('div');
+  div.innerHTML = `
+    <div class="seq-drop" id="seqDrop">
+      <span class="seq-drop-icon">🎞️</span>
+      <div class="seq-drop-title">Drop your frame sequence here</div>
+      <div class="seq-drop-sub">
+        Drag all PNGs at once, drag a <strong>folder</strong>,
+        or drop a <strong>ZIP archive</strong><br>
+        From After Effects: <em>Composition → Add to Render Queue → PNG Sequence</em><br>
+        From Triaxes: <em>File → Export Frames</em>
+      </div>
+      <input type="file" id="seqFileInput" multiple accept="image/*,.zip" style="display:none" />
+    </div>
+    <div class="seq-progress-bar" id="seqProgressBar" style="display:none">
+      <div class="seq-progress-fill" id="seqProgressFill"></div>
+    </div>
+    <div class="seq-count" id="seqCount" style="display:none"></div>
+    <div class="seq-strip" id="seqStrip" style="display:none"></div>`;
+  zonesEl.appendChild(div);
+
+  const drop  = document.getElementById('seqDrop');
+  const input = document.getElementById('seqFileInput');
+
+  drop.addEventListener('click',     ()  => input.click());
+  drop.addEventListener('dragover',  e   => { e.preventDefault(); drop.classList.add('drag-over'); });
+  drop.addEventListener('dragleave', ()  => drop.classList.remove('drag-over'));
+  drop.addEventListener('drop',      e   => {
+    e.preventDefault(); drop.classList.remove('drag-over');
+    loadSeqFromDrop(e.dataTransfer);
+  });
+  input.addEventListener('change',   e   => loadSeqFromFiles([...e.target.files]));
+}
+
+async function loadSeqFromDrop(dt) {
+  /* Support folder drop via FileSystemEntry API */
+  const items = [...(dt.items || [])];
+  const files = [];
+
+  for (const item of items) {
+    if (item.kind !== 'file') continue;
+    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) {
+      await readDirEntry(entry, files);
+    } else {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length === 0) return;
+
+  /* Single ZIP — extract it */
+  if (files.length === 1 && files[0].name.toLowerCase().endsWith('.zip')) {
+    await loadSeqFromZip(files[0]);
+    return;
+  }
+  await loadSeqFromFiles(files);
+}
+
+function readDirEntry(dirEntry, out) {
+  return new Promise(resolve => {
+    const reader = dirEntry.createReader();
+    const readBatch = () => {
+      reader.readEntries(async entries => {
+        if (!entries.length) { resolve(); return; }
+        for (const e of entries) {
+          if (e.isFile && /\.(png|jpe?g|webp)$/i.test(e.name)) {
+            await new Promise(r => e.file(f => { out.push(f); r(); }));
+          } else if (e.isDirectory) {
+            await readDirEntry(e, out);
+          }
+        }
+        readBatch();
+      });
+    };
+    readBatch();
+  });
+}
+
+async function loadSeqFromZip(zipFile) {
+  setSeqStatus('Extracting ZIP…', 0);
+  try {
+    const JSZip = window.JSZip;
+    if (!JSZip) { setSeqStatus('JSZip not loaded — refresh and try again.', -1); return; }
+    const zip    = await JSZip.loadAsync(zipFile);
+    const names  = Object.keys(zip.files)
+      .filter(n => /\.(png|jpe?g|webp)$/i.test(n) && !zip.files[n].dir)
+      .sort();
+
+    const blobs = [];
+    for (let i = 0; i < names.length; i++) {
+      const blob = await zip.files[names[i]].async('blob');
+      blobs.push(new File([blob], names[i], { type: 'image/png' }));
+      setSeqStatus(`Extracting… ${i+1}/${names.length}`, (i+1)/names.length);
+    }
+    await loadSeqFromFiles(blobs);
+  } catch(e) {
+    setSeqStatus('ZIP error: ' + e.message, -1);
+  }
+}
+
+async function loadSeqFromFiles(files) {
+  /* Filter to images, sort by filename */
+  const imgFiles = files
+    .filter(f => /\.(png|jpe?g|webp)$/i.test(f.name))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  if (!imgFiles.length) {
+    setSeqStatus('No image files found. Drop PNG/JPG files or a ZIP.', -1);
+    return;
+  }
+
+  /* Subsample to max 60 frames for performance */
+  const MAX_FRAMES = 60;
+  const step = imgFiles.length > MAX_FRAMES
+    ? imgFiles.length / MAX_FRAMES
+    : 1;
+  const picked = [];
+  for (let i = 0; i < imgFiles.length; i += step) {
+    picked.push(imgFiles[Math.round(i)]);
+    if (picked.length >= MAX_FRAMES) break;
+  }
+
+  setSeqStatus(`Loading ${picked.length} frames…`, 0);
+  const dataURLs = [];
+  for (let i = 0; i < picked.length; i++) {
+    dataURLs.push(await fileToDataURL(picked[i]));
+    setSeqStatus(`Loading… ${i+1}/${picked.length}`, (i+1)/picked.length);
+  }
+
+  S.seqFrames = dataURLs;
+  showSeqStrip(dataURLs, imgFiles.length);
+  checkReady();
+
+  const msg = imgFiles.length > MAX_FRAMES
+    ? `✓ ${dataURLs.length} frames loaded (subsampled from ${imgFiles.length})`
+    : `✓ ${dataURLs.length} frames loaded`;
+  setSeqStatus(msg, 1);
+}
+
+function fileToDataURL(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = e => res(e.target.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function setSeqStatus(msg, progress) {
+  const count = document.getElementById('seqCount');
+  const bar   = document.getElementById('seqProgressBar');
+  const fill  = document.getElementById('seqProgressFill');
+  if (count) { count.style.display = 'block'; count.textContent = msg; }
+  if (bar && progress >= 0 && progress <= 1) {
+    bar.style.display = 'block';
+    if (fill) fill.style.width = (progress * 100).toFixed(1) + '%';
+  } else if (bar) {
+    bar.style.display = 'none';
+  }
+}
+
+function showSeqStrip(dataURLs, total) {
+  const strip = document.getElementById('seqStrip');
+  const drop  = document.getElementById('seqDrop');
+  if (!strip || !drop) return;
+  drop.classList.add('has-frames');
+  drop.querySelector('.seq-drop-title').textContent = total + ' frames loaded';
+
+  strip.style.display = 'flex';
+  strip.innerHTML = '';
+  /* Show max 20 thumbnails in strip */
+  const step = Math.max(1, Math.ceil(dataURLs.length / 20));
+  for (let i = 0; i < dataURLs.length; i += step) {
+    const img = document.createElement('img');
+    img.src = dataURLs[i];
+    strip.appendChild(img);
+  }
+}
+
+/* ── Render: Frame Sequence ────────────────────────────────────── */
+function renderSequence(cc) {
+  cc.innerHTML = '';
+  const frames = S.seqFrames;
+  const N      = frames.length;
+  if (!N) return;
+
+  /* Pre-load all frames as decoded Image elements (GPU-cached). */
+  const { CW: MW, CH: MH } = cardSrcDims();
+  const imgEls = frames.map(src => { const img = new Image(); img.src = src; return img; });
+  const offCvs = document.createElement('canvas'); offCvs.width = MW; offCvs.height = MH;
+  const offCtx = offCvs.getContext('2d');
+
+  let _fi = 0, paused = false;
+  S.frameFn = (now, tilt) => {
+    /* tilt −1…+1 → frame 0…N−1, smoothed so it scrubs cleanly */
+    const rawT  = (tilt + 1) / 2;
+    const lensT = rawT * rawT * (3 - 2 * rawT);
+    if (!paused) _fi += (lensT * (N - 1) - _fi) * 0.12;
+    const fi = Math.max(0, Math.min(N - 1, Math.round(_fi)));
+    const img = imgEls[fi];
+    if (!img || !img.complete || img.naturalWidth === 0) return null;
+    offCtx.clearRect(0, 0, MW, MH);
+    drawCover(offCtx, img, MW, MH);
+    return offCvs;
+  };
+  addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SELECT EFFECT
+   ═══════════════════════════════════════════════════════════════ */
+function selectEffect(i) {
+  S.effectIdx = i;
+  const eff = EFFECTS[i];
+  /* If current orientation not supported by new effect, reset to lr */
+  if (!eff.orientations.includes(S.orientation)) S.orientation = 'lr';
+  stopHandComposite();
+  buildUploadPanel();
+  showPlaceholder();
+
+  /* Pre-warm the AI depth model as soon as 3D is selected.
+     The model (~30 MB) downloads silently in the background so it's
+     cached and ready before the customer uploads their image.
+     (Layered 3D no longer uses depth maps — it's PSD-layer planes.)   */
+  if (eff.id === 'threed' && !window._depthPipe) {
+    import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2')
+      .catch(() => import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2'))
+      .then(({ pipeline, env }) => {
+        if (env) { env.allowRemoteModels = true; env.allowLocalModels = false; }
+        return pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { dtype: 'fp32' });
+      })
+      .then(pipe => { window._depthPipe = pipe; console.log('[depth] model ready'); })
+      .catch(e => console.warn('[depth] pre-warm failed:', e));
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INIT
+   ═══════════════════════════════════════════════════════════════ */
+buildUploadPanel();
+showPlaceholder();
+</script>
+</body>
+</html>
