@@ -3581,6 +3581,16 @@ function selectEffect(i) {
 /* ═══════════════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════════════ */
+/* Deep-link: ?effect=<id> preselects an effect so product pages can send
+   customers straight to the relevant preview (2026-07-04). Accepted ids:
+   flip, morph, threed (alias: 3d), layered3d, animation, zoom,
+   stereoscopic, sequence. Unknown values fall back to the default.     */
+(() => {
+  const want = (new URLSearchParams(location.search).get('effect') || '').toLowerCase();
+  const id = want === '3d' ? 'threed' : want;
+  const idx = EFFECTS.findIndex(e => e.id === id);
+  if (idx >= 0) S.effectIdx = idx;
+})();
 buildUploadPanel();
 showPlaceholder();
 </script>
