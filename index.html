@@ -733,7 +733,7 @@ const EFFECTS = [
     imgLabels: ['Your Design'],
     accept: ['.psd,image/*'],
     psd: false,
-    orientations: ['lr', 'ud'],
+    orientations: ['lr'],   /* depth parallax is horizontal only — no up/down */
     tips: ['Images with a clear foreground subject work best.', 'Move your mouse over the preview for extra depth.', 'PSD files are accepted too (flattened automatically).'],
     steps: ['Upload your design', 'Click Generate Preview', 'Move your mouse over the card for depth'],
     hintText: 'Move your mouse over the card for added depth'
@@ -747,7 +747,7 @@ const EFFECTS = [
     imgLabels: ['Your PSD File (layers = depth planes)'],
     accept: ['.psd'],
     psd: true,
-    orientations: ['lr', 'ud'],
+    orientations: ['lr'],   /* layer parallax is horizontal only — no up/down */
     tips: ['Each element on its own PSD layer — bottom layer = background, top layer = closest to the viewer.', 'Keep the background layer larger than the card so edges never show when it shifts.', '3–6 layers give the strongest depth. More layers = smoother depth graduation.'],
     steps: ['Prepare a PSD with each element on its own layer', 'Upload the PSD file', 'Click Generate Preview', 'Watch the layers separate in depth as the card tilts'],
     hintText: 'PSD layers shift at different rates — true layered depth'
@@ -789,7 +789,7 @@ const EFFECTS = [
     imgLabels: ['Image 1 (Left view)', 'Image 2 (Right view)'],
     accept: ['.psd,image/*', '.psd,image/*'],
     psd: false,
-    orientations: ['lr', 'ud'],
+    orientations: ['lr'],   /* stereo parallax is horizontal only — no up/down */
     tips: ['Shoot or render the same scene from two positions a few centimetres apart.', 'Image 1 = left view, Image 2 = right view. The small offset between them is what creates the depth.', 'The bigger the offset, the stronger (but harsher) the 3D. A few centimetres is ideal.', 'PSD files are accepted too (flattened automatically).'],
     steps: ['Upload the left view image', 'Upload the right view image', 'Click Generate Preview', 'Watch the depth appear as the card tilts'],
     hintText: 'The card tilt sweeps between your two offset views — that parallax is the 3D'
@@ -914,20 +914,51 @@ let _stableCardW = 0, _stableCardH = 0;
 /* Raw card centre from chroma key (12 fps) — smoothing done in draw() at 60 fps */
 let _rawCardCX = null, _rawCardCY = null;
 let _q0ForExt = null;   /* unflared card quad — portrait extension geometry */
-let _thumbCutY = 0;     /* portrait: video re-drawn below this y (thumbs)   */
 /* Portrait upright-print stabilisers — smoothed centre / held width / bottom,
    so the straight print does not jump left-right or pulse narrow as the card
    rocks (would reveal the black backdrop behind it). */
-let _portCx = null, _portHW = 0, _portBot = null;
-let _thumbLX = 0, _thumbRX = 0;   /* portrait: grip x-positions for thumb restore */
+let _portDL = null, _portDR = null, _portSplitX = 0;  /* v7: per-frame hand shifts + split column */
 let _handTmp = null, _handTmpCtx = null;   /* scratch canvas for skin-only hand overlay */
+
+/* square(0..1)² → quad projective point mapper (Heckbert square-to-quad).
+   Used by portrait v7 to place the portrait print on the card PLANE, so it
+   rocks with the footage. ⚠ The translation term is x0 (NOT x0·w): an early
+   x0·w variant was near-correct at mild tilts but wrong at strong
+   perspective — it detached the far hand and squashed the print at the rock
+   extremes. Validated against cv2.getPerspectiveTransform to 0.0000px
+   (scratchpad v7_corner_proto.py, 2026-07-17).                            */
+function _quadUV(c) {
+  const x0 = c[0].x, y0 = c[0].y, x1 = c[1].x, y1 = c[1].y,
+        x2 = c[2].x, y2 = c[2].y, x3 = c[3].x, y3 = c[3].y;
+  const dx1 = x1 - x2, dy1 = y1 - y2, dx2 = x3 - x2, dy2 = y3 - y2;
+  const sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
+  const den = dx1 * dy2 - dx2 * dy1 || 1e-9;
+  const g = (sx * dy2 - sy * dx2) / den;
+  const h = (dx1 * sy - dy1 * sx) / den;
+  const a = x1 - x0 + g * x1, b = x3 - x0 + h * x3;
+  const d = y1 - y0 + g * y1, e = y3 - y0 + h * y3;
+  return (u, v) => {
+    const w = g * u + h * v + 1;
+    return { x: (a * u + b * v + x0) / w, y: (d * u + e * v + y0) / w };
+  };
+}
+
+/* (Portrait v7 needs NO extra grip data: the hands are translated by the
+   exact corner-to-corner vector — print bottom corner minus tracked card
+   bottom corner — which preserves the filmed pinch rigidly. An earlier
+   fingertip-measurement approach (portrait_grips.json) was removed; the
+   separated layers in portrait-layers\ remain for offline verification.)  */
 
 
 /* ── Per-frame card corner tracking data (loaded from tracking_data.json) ── */
 let trackingData = null;
 fetch('tracking_data.json', { cache: 'no-cache' })
   .then(r => r.json())
-  .then(d => { trackingData = d; console.log('[tracking] loaded:', Object.keys(d)); })
+  .then(d => {
+    trackingData = d;
+    _tiltRange = _computeTiltRanges(d);
+    console.log('[tracking] loaded:', Object.keys(d), 'tiltRange:', _tiltRange);
+  })
   .catch(() => console.warn('[tracking] tracking_data.json not found — bounding-box fallback'));
 
 function startHandComposite() {
@@ -1168,30 +1199,77 @@ function _composeFrame(mediaTime) {
      the black border is aligned with the image by construction.             */
   let extCorners = null, overQuad = null, extClip = null;
   if (S.cardFit === 'portrait' && corners) {
-    const q0 = _q0ForExt || corners;
-    const [, , BR, BL] = q0;             /* unflared tracked card — grip corners */
-    const rawCx = (BL.x + BR.x) / 2, rawHW = Math.abs(BR.x - BL.x) / 2;
-    const rawBot = Math.max(BL.y, BR.y);
-    if (_portCx == null || Math.abs(rawCx - _portCx) > 250) { _portCx = rawCx; _portHW = rawHW; _portBot = rawBot; }
-    const K = 0.35;                                  /* light: follows hands, kills jitter */
-    _portCx  += (rawCx  - _portCx)  * K;
-    _portBot += (rawBot - _portBot) * K;
-    _portHW  += (rawHW  - _portHW)  * K;
-    const cx = _portCx;
-    const halfW = Math.max(20, _portHW) * 1.02;     /* grip-to-grip + tiny pad */
-    const bottomY = _portBot;
-    let printH = (2 * halfW) / 0.8;                 /* portrait aspect 0.8 (w:h) */
-    let topY = bottomY - printH;
-    const margin = 6;
-    if (topY < margin) { topY = margin; printH = bottomY - topY; }   /* keep in frame */
-    const UL = { x: cx - halfW, y: topY }, UR = { x: cx + halfW, y: topY };
-    const LR = { x: cx + halfW, y: bottomY }, LL = { x: cx - halfW, y: bottomY };
-    extClip = [ UL, UR, LR, LL ];
-    const rcy = (topY + bottomY) / 2;
-    extCorners = extClip.map(p => ({ x: cx + (p.x - cx) * 1.01, y: rcy + (p.y - rcy) * 1.01 }));
-    overQuad = extClip;
-    _thumbCutY = bottomY - 0.15 * printH;           /* skin-restore band top */
-    if (window.__dbgGeo) window.__lastGeo = { corners, q0, extCorners, extClip, eTL: UL, eTR: UR, tilt, thumbCutY: _thumbCutY };
+    /* ── PORTRAIT v7 (2026-07-17, Marc's layer-separation concept) ────────
+       The placeholder is a TRUE PORTRAIT CARD ON THE CARD PLANE — it rocks
+       with the footage exactly like the landscape card — and the two real
+       hands are shifted inward per frame so their fingertips pinch its side
+       edges at the SAME card height where they pinched the landscape card
+       (v_grip ≈ 0.99: the bottom-corner grip, measured from the separated
+       layers; see _V_GRIP). Because the print quad and the hand shifts are
+       derived from the SAME tracked quad each frame, print and grip cannot
+       drift apart — the per-frame lock that a static Photoshop transform
+       could not give. Supersedes v4/v6 "sits straight": with the hands
+       moving too, the rocking portrait card is coherent (Marc: "rotate the
+       placeholder to portrait ... holds it snugly like the landscape
+       preview does"). Geometry prototyped + measured offline
+       (scratchpad portrait_v7_proto.py / v7_measure_grip.py).            */
+    let q0 = (gn > 800 ? _q0ForExt : null);
+    if (!q0) {          /* fallback: un-overscan the tracked corners (÷1.10) */
+      const ccx = (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4;
+      const ccy = (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4;
+      q0 = corners.map(p => ({ x: ccx + (p.x - ccx) / 1.10, y: ccy + (p.y - ccy) / 1.10 }));
+    }
+    const map = _quadUV(q0);
+    const cardAspect = isUD ? 1.75 : 1.72;
+    /* ── Print size (2026-07-20, Marc: "expand to the edges so it sits snug").
+       The old fixed PW=0.66 left the portrait print sitting small INSIDE the
+       grip with black margin. We now make the print as WIDE as possible — up
+       to the full card width (PW=1.0), where its bottom corners land exactly
+       on the real gripped card corners = snug by construction, no margin —
+       while capping the HEIGHT so the print's top corners never leave the top
+       of the frame (a 4:5 portrait at full card width is taller than the
+       card, so on a tall/narrow preview full width would overflow and crop
+       the design). Result: on a normal wide preview it fills the full grip
+       width; on a narrow one it shrinks just enough to stay fully visible.
+       PH↔PW are locked to pixel-aspect 0.8 (cardSrcDims 384×480).          */
+    const MARGIN = 8;                                  /* px kept clear at frame top */
+    const phFromPw = pw => pw * cardAspect / 0.8;
+    const topYForPh = ph => {
+      const pw = ph * 0.8 / cardAspect;
+      const a = map(0.5 - pw / 2, 1 - ph), b = map(0.5 + pw / 2, 1 - ph);
+      return Math.min(a.y, b.y);                       /* higher on screen = smaller y */
+    };
+    const phCap = phFromPw(1.0);                       /* never wider than the card */
+    let PH;
+    if (topYForPh(phCap) >= MARGIN) {
+      PH = phCap;                                      /* full width fits — snug */
+    } else {
+      let lo = 0.2, hi = phCap;                        /* largest PH whose top stays in-frame */
+      for (let it = 0; it < 22; it++) {
+        const mid = (lo + hi) / 2;
+        if (topYForPh(mid) >= MARGIN) lo = mid; else hi = mid;
+      }
+      PH = lo;
+    }
+    const PW = PH * 0.8 / cardAspect;
+    const u0 = 0.5 - PW / 2, u1 = 0.5 + PW / 2;
+    /* Print bottom edge COLLINEAR with the card's bottom edge (v ∈ [1−PH, 1]):
+       the print's bottom corners land exactly where the card's bottom corners
+       sit, at the hands' filmed height — the print towers upward from there. */
+    const v0 = 1 - PH, v1 = 1;
+    const UL = map(u0, v0), UR = map(u1, v0), LR = map(u1, v1), LL = map(u0, v1);
+    extCorners = [ UL, UR, LR, LL ];
+    extClip = extCorners;
+
+    /* Grip: translate each hand by the EXACT corner-to-corner vector (print
+       bottom corner − tracked card bottom corner). A rigid translation
+       preserves the filmed pinch↔corner relationship perfectly, so finger
+       and thumb wrap the print's bottom corner exactly as they wrap the
+       card's in the footage — snug by construction, at every tilt.        */
+    _portDL = { x: LL.x - q0[3].x, y: LL.y - q0[3].y };
+    _portDR = { x: LR.x - q0[2].x, y: LR.y - q0[2].y };
+    _portSplitX = Math.round((q0[0].x + q0[1].x + q0[2].x + q0[3].x) / 4);
+    if (window.__dbgGeo) window.__lastGeo = { corners, q0, extCorners, tilt, dL: _portDL, dR: _portDR, splitX: _portSplitX };
   }
   const warpQuad = extCorners || corners;
 
@@ -1202,20 +1280,16 @@ function _composeFrame(mediaTime) {
   catch (e) { console.error('[compositor] frameFn error:', e); }
 
   if (S.cardFit === 'portrait' && extClip) {
-    /* ── PORTRAIT v6 final draw (user 2026-07-04 night: "remove the black
-       placeholder"): the studio video background is NOT drawn at all, so the
-       keyed-out tilted card can never show as a dark shape behind the print.
-       Scene = flat dark backdrop + straight upright print + ONLY the hands
-       (skin pixels) composited on top. Nothing else exists to misalign.    */
+    /* ── PORTRAIT v7 draw: flat backdrop (video background never drawn — no
+       black placeholder can exist) + print warped onto the rocking portrait
+       quad + the two real hands, split at the card centre and each half
+       translated so its fingertips pinch the print's side edges.          */
     handCtx.fillStyle = '#050608';
     handCtx.fillRect(0, 0, W, H);
     if (src) perspectiveDraw(handCtx, src, extCorners, 10);
-    /* hands: skin-only overlay from the whole video band, drawn in front so
-       the print sits between finger (behind print edge) and thumb (in front) */
-    if (_composeWorkCtx) {
-      const { dy: bdy, dh: bdh } = _videoLetterbox(W, H);
-      const bandTop = Math.max(0, Math.floor(bdy));
-      const bandH = Math.min(H, Math.ceil(bdy + bdh)) - bandTop;
+    if (_composeWorkCtx && _portDL && _portDR) {
+      const bandTop = Math.max(0, Math.floor(dy));
+      const bandH = Math.min(H, Math.ceil(dy + dh)) - bandTop;
       if (bandH > 2) {
         if (!_handTmp) { _handTmp = document.createElement('canvas'); _handTmpCtx = _handTmp.getContext('2d'); }
         if (_handTmp.width !== W) _handTmp.width = W;
@@ -1227,7 +1301,12 @@ function _composeFrame(mediaTime) {
           if (!(r > 85 && r >= g && r - b > 12)) dd[i + 3] = 0;
         }
         _handTmpCtx.putImageData(img, 0, 0);
-        handCtx.drawImage(_handTmp, 0, bandTop);
+        /* left/right hand halves, integer shifts (no resample blur) */
+        const spx = Math.max(1, Math.min(W - 1, _portSplitX));
+        handCtx.drawImage(_handTmp, 0, 0, spx, bandH,
+                          Math.round(_portDL.x), bandTop + Math.round(_portDL.y), spx, bandH);
+        handCtx.drawImage(_handTmp, spx, 0, W - spx, bandH,
+                          spx + Math.round(_portDR.x), bandTop + Math.round(_portDR.y), W - spx, bandH);
       }
     }
   } else {
@@ -1741,6 +1820,41 @@ function tiltFromCorners(c, isUD) {
   return Math.max(-1, Math.min(1, ratio * (isUD ? _TILT_SCALE.ud : _TILT_SCALE.lr)));
 }
 
+/* ── Per-video tilt range, measured once from the tracking data itself ────
+   The two rocks are NOT symmetric (LR spans ≈ −0.98..+0.96 but UD only
+   ≈ −0.63..+1.0), so effects that SWEEP the tilt range (flip, morph) must
+   normalise against the video's real extremes — otherwise the UD sweep
+   never reaches pure image A at the bottom of the rock and idles ~60/40
+   blended. Computed from the same tiltFromCorners the compositor uses, so
+   it is exact for whatever footage is loaded (re-tracking new videos
+   updates it automatically).                                             */
+let _tiltRange = null;
+function _computeTiltRanges(d) {
+  const out = {};
+  for (const key in d) {
+    const frames = d[key] && d[key].frames;
+    if (!frames) continue;
+    const isUD = key.indexOf('card_02') === 0 || key.indexOf('hands_02') === 0;
+    let mn = Infinity, mx = -Infinity;
+    for (const f of frames) {
+      if (!f) continue;
+      const t = tiltFromCorners(f.map(p => ({ x: p[0], y: p[1] })), isUD);
+      if (t < mn) mn = t;
+      if (t > mx) mx = t;
+    }
+    if (mx > mn) out[key] = { min: mn, max: mx };
+  }
+  return out;
+}
+/* Raw tilt → 0..1 sweep position across the current video's real range.
+   0 = one extreme of the rock (image A), 1 = the other (image B).       */
+function tiltSweepT(tilt) {
+  const key = S.orientation === 'ud' ? 'card_02_03' : 'card_01_03';
+  const r = _tiltRange && _tiltRange[key];
+  const t = r ? (tilt - r.min) / (r.max - r.min) : (tilt + 1) / 2;
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
 /* Keyframe fallback, used only before tracking_data.json has loaded. */
 const CARD_LR_KF = [
   {t:0.00, v:-12}, {t:0.20, v:-4},
@@ -1891,24 +2005,22 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING — natural lenticular: the crossover is at the CENTRE of the
-     rock (tilt ≈ 0, card flat/head-on). As the card tilts away from centre the
-     image dissolves A↔B, the same way a real lenticular print changes with the
-     viewing angle. A sigmoid centred at 0 gives a smooth but defined switch:
-     image A is shown clearly when tilted one way, B the other, dissolving
-     through the centre. */
+     FLIP TIMING (2026-07-17, user request): EXACTLY the morph's transition
+     code. The old sigmoid centre-crossover concentrated the whole dissolve
+     into the fast centre swing — a ~0.2s double-exposure flash while the
+     card moved at its fastest, which read as "shaky" — and the user asked
+     for the morph's smoothness on the flip. So the crossfade now sweeps the
+     card's WHOLE tilt range (normalised to the video's real extremes by
+     tiltSweepT): pure A at one end of the rock, pure B at the other, the
+     dissolve progressing gently through the swing and settling during the
+     end dwells. Same smoothstep + 0.15 follow as renderMorph.             */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre).
-       Steepness 3.5 (was 7) + slower follow 0.22 (was 0.5): user 2026-07-04
-       wanted a visibly smoother flip — the old values snapped A→B too hard. */
-    const lensT = 1 / (1 + Math.exp(-3.5 * tilt)); /* 0 at −tilt, 1 at +tilt */
-    if (!paused) op += (lensT - op) * 0.22;         /* smooth follow */
-    op = op < 0 ? 0 : op > 1 ? 1 : op;
-
-    /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
-    const a = op*op*op * (op*(op*6 - 15) + 10);
+    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
+    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
+    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
+    const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
     cctx.clearRect(0, 0, CW, CH);
     cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
@@ -1929,6 +2041,37 @@ function renderFlip(cc) {
    images toward the interpolated mesh then dissolves between them.
    Completely separate from renderFlip — no shared code.
    ═══════════════════════════════════════════════════════════════ */
+
+/* ── Face-api model loader — GLOBAL one-shot promise ──────────────────
+   (fixed 2026-07-18) Models used to load in a fire-and-forget block
+   LOCAL to each renderMorph call, setting a local _faceApiReady flag,
+   while generateFrames started just 60ms later and only CHECKED the
+   flag. Parsing the 5.6MB SSD detector takes 1-3s, so generation won
+   the race every single time: detection was skipped, every face pair
+   silently fell to the optical-flow path (the "liquify swirl"), and
+   PATH A never ran in practice. generateFrames must AWAIT this shared
+   promise (with a timeout cap) before deciding which path to take.  */
+let _faceModelsPromise = null;
+function ensureFaceModels() {
+  if (_faceModelsPromise) return _faceModelsPromise;
+  _faceModelsPromise = (async () => {
+    const st = { ready: false, ssd: false };
+    try {
+      if (typeof faceapi === 'undefined') return st;
+      await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+      await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+      st.ready = true;
+      try {
+        await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+        st.ssd = true;
+      } catch(e) { console.warn('[morph] SSD detector unavailable, using tiny:', e); }
+      console.log('[morph] face-api models ready (ssd=' + st.ssd + ')');
+    } catch(e) { console.warn('[morph] face-api load failed:', e); }
+    return st;
+  })();
+  return _faceModelsPromise;
+}
+
 function renderMorph(cc) {
   const ca    = document.getElementById('cardArea');
   const scene = document.getElementById('handScene');
@@ -1976,25 +2119,12 @@ function renderMorph(cc) {
   }
 
   /* ── Frame pre-generation ────────────────────────────────── */
-  /* ── Ensure face-api models are loaded before first use ────────────────
+  /* Kick off the global model load NOW so it overlaps image decode.
      SSD MobileNet v1 (added 2026-07-02) is the PRIMARY detector — it is far
      more robust than TinyFaceDetector, which kept missing the user's faces
      and silently degraded every face morph to an optical-flow crossfade.
      Tiny stays as fallback if the SSD weights fail to load.              */
-  let _faceApiReady = false, _ssdReady = false;
-  (async () => {
-    try {
-      if (typeof faceapi === 'undefined') return;
-      await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-      await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
-      _faceApiReady = true;
-      try {
-        await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
-        _ssdReady = true;
-      } catch(e) { console.warn('[morph] SSD detector unavailable, using tiny:', e); }
-      console.log('[morph] face-api models ready (ssd=' + _ssdReady + ')');
-    } catch(e) { console.warn('[morph] face-api load failed:', e); }
-  })();
+  ensureFaceModels();
 
   /* ── Bowyer-Watson Delaunay triangulation ─────────────────────────────
      Input: pts = [[x,y], …]
@@ -2013,9 +2143,18 @@ function renderMorph(cc) {
       const ax=a[0]-px, ay=a[1]-py;
       const bx=b[0]-px, by=b[1]-py;
       const cx=c[0]-px, cy=c[1]-py;
-      return (ax*ax+ay*ay)*(bx*cy-by*cx)
-           - (bx*bx+by*by)*(ax*cy-ay*cx)
-           + (cx*cx+cy*cy)*(ax*by-ay*bx) > 0;
+      /* In-circle determinant sign depends on triangle WINDING (fixed
+         2026-07-18): without the orientation factor, CW-wound triangles
+         give an inverted test — harmless at ~100 points but at the
+         hybrid's ~250 points it corrupted the whole mesh (2900 triangles
+         instead of ~490, overlapping slivers + black pinholes).
+         Validated offline in Node: 425 tris for 220 pts, zero overlap,
+         full coverage, Euler counts exact (scratchpad delaunay_test*).*/
+      const det = (ax*ax+ay*ay)*(bx*cy-by*cx)
+                - (bx*bx+by*by)*(ax*cy-ay*cx)
+                + (cx*cx+cy*cy)*(ax*by-ay*bx);
+      const orient = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+      return orient > 0 ? det > 0 : det < 0;
     }
 
     for (let pi = 0; pi < n; pi++) {
@@ -2149,7 +2288,14 @@ function renderMorph(cc) {
        effect"). Detect at 640px with a bigger input size and a lower
        threshold, then scale the landmarks down to work-canvas coords.  */
     let pts1 = null, pts2 = null;
-    if (_faceApiReady && typeof faceapi !== 'undefined') {
+    /* AWAIT the shared model promise (15s cap) — checking a not-yet-set
+       flag here is exactly the race that killed every face morph.      */
+    const _fm = await Promise.race([
+      ensureFaceModels(),
+      new Promise(r => setTimeout(() => r({ ready: false, ssd: false, timedOut: true }), 15000))
+    ]);
+    if (_fm.timedOut) console.warn('[morph] face-api model load timed out — optical-flow fallback');
+    if (_fm.ready && typeof faceapi !== 'undefined') {
       showProgress(5, 'Detecting facial landmarks…');
       await new Promise(r => setTimeout(r, 0));
       try {
@@ -2161,7 +2307,7 @@ function renderMorph(cc) {
         };
         const detCvsA = mkDet(imgA), detCvsB = mkDet(imgB);
         const detOne = async cvs => {
-          if (_ssdReady) {
+          if (_fm.ssd) {
             const d = await faceapi.detectSingleFace(cvs,
               new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 })).withFaceLandmarks();
             if (d) return d;
@@ -2189,31 +2335,223 @@ function renderMorph(cc) {
       showProgress(15, 'Building Delaunay mesh…');
       await new Promise(r => setTimeout(r, 0));
 
-      /* Add boundary control points (same positions for both images) */
+      /* ── HYBRID FEATURE POINTS (2026-07-18, user request) ──────────
+         The 68 landmarks cover ONLY the face, so hats / shoulders /
+         background crossfaded as a static double-exposure (FantaMorph
+         covers those areas with MANUALLY placed points). Add
+         automatically-detected high-contrast points OUTSIDE the face
+         hull, each given its image-B correspondence by the SAME
+         pyramidal optical flow PATH B uses. Landmarks stay
+         authoritative on the face: candidates inside either image's
+         expanded face hull are rejected, so flow noise can never fight
+         the landmark mesh. Flow is damped near the canvas border
+         (boundary points are pinned) and outlier displacements are
+         dropped (> max(25px, 3×median)) to avoid fold-over swirls.  */
+      try {
+        if (window.__noHybrid) throw new Error('hybrid disabled for debug');
+        showProgress(8, 'Tracking background features…');
+        let { u: flowU, v: flowV } = await computeMorphFlow();
+        /* Same 3-pass 3×3 box blur PATH B applies before rendering —
+           sampling the RAW field gave rogue correspondences (wiry
+           streak triangles in textured areas like foliage).          */
+        const blurN = (src) => {
+          const dst = new Float32Array(N);
+          for (let y = 1; y < MH-1; y++)
+            for (let x = 1; x < MW-1; x++) {
+              const i = y*MW + x;
+              dst[i] = (src[i-MW-1]+src[i-MW]+src[i-MW+1]+
+                        src[i-1]   +src[i]   +src[i+1]   +
+                        src[i+MW-1]+src[i+MW]+src[i+MW+1]) / 9;
+            }
+          for (let x = 0; x < MW; x++) { dst[x] = src[x]; dst[(MH-1)*MW+x] = src[(MH-1)*MW+x]; }
+          for (let y = 0; y < MH; y++) { dst[y*MW] = src[y*MW]; dst[y*MW+MW-1] = src[y*MW+MW-1]; }
+          return dst;
+        };
+        flowU = blurN(blurN(blurN(flowU)));
+        flowV = blurN(blurN(blurN(flowV)));
+
+        /* convex hull of the landmarks, expanded ×1.12 about centroid */
+        const hullOf = (pts) => {
+          const s = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+          const cross = (o, a, b) => (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]);
+          const lo = [], up = [];
+          for (const p of s) { while (lo.length > 1 && cross(lo[lo.length-2], lo[lo.length-1], p) <= 0) lo.pop(); lo.push(p); }
+          for (let i = s.length - 1; i >= 0; i--) { const p = s[i]; while (up.length > 1 && cross(up[up.length-2], up[up.length-1], p) <= 0) up.pop(); up.push(p); }
+          const h = lo.slice(0, -1).concat(up.slice(0, -1));
+          let cx = 0, cy = 0; for (const p of h) { cx += p[0]; cy += p[1]; } cx /= h.length; cy /= h.length;
+          /* extra headroom ABOVE the brows: the 68-landmark scheme has
+             no forehead points, so without this, flow points sit right
+             above the eyes and their triangles smear into the face.  */
+          return h.map(p => {
+            const ex = cx + (p[0]-cx)*1.12;
+            const ey = cy + (p[1]-cy)*(p[1] < cy ? 1.45 : 1.12);
+            return [ex, ey];
+          });
+        };
+        /* winding-agnostic convex point-in-polygon */
+        const inHull = (h, x, y) => {
+          let sgn = 0;
+          for (let i = 0; i < h.length; i++) {
+            const a = h[i], b = h[(i+1) % h.length];
+            const c = (b[0]-a[0])*(y-a[1]) - (b[1]-a[1])*(x-a[0]);
+            if (c !== 0) { const s = c > 0 ? 1 : -1; if (sgn === 0) sgn = s; else if (s !== sgn) return false; }
+          }
+          return true;
+        };
+        const hullA = hullOf(pts1), hullB = hullOf(pts2);
+
+        /* strongest-gradient pixel per 16px grid cell of image A */
+        const gA = new Float32Array(N);
+        for (let i = 0; i < N; i++) { const p = i*4; gA[i] = (d1[p]*0.299 + d1[p+1]*0.587 + d1[p+2]*0.114) / 255; }
+        const CELL = 16, GTH2 = 0.0064;   /* ≈ per-pixel gradient 0.04 */
+        const cand = [];
+        for (let cy0 = 0; cy0 < MH; cy0 += CELL)
+          for (let cx0 = 0; cx0 < MW; cx0 += CELL) {
+            let bg = 0, bx = -1, by = -1;
+            const yEnd = Math.min(cy0 + CELL, MH - 2), xEnd = Math.min(cx0 + CELL, MW - 2);
+            for (let y = Math.max(cy0, 2); y < yEnd; y++)
+              for (let x = Math.max(cx0, 2); x < xEnd; x++) {
+                const i = y*MW + x;
+                const gx = gA[i+1] - gA[i-1], gy = gA[i+MW] - gA[i-MW];
+                const g = gx*gx + gy*gy;
+                if (g > bg) { bg = g; bx = x; by = y; }
+              }
+            if (bx >= 0 && bg > GTH2) cand.push([bx, by]);
+          }
+
+        /* ── Similarity transform of the FACE (Umeyama least squares over
+           the 68 landmark pairs). Points NEAR the face must move WITH
+           the head — a hat brim or collar whose optical flow disagrees
+           with the landmark motion shears its triangles straight into
+           the face (dark visor streak across the nose in testing).
+           This is exactly what a FantaMorph operator does manually:
+           hat/collar points follow the head, background points don't.
+           Blend rigid-with-head → pure flow by distance from the face. */
+        const LM = pts1.length;   /* landmarks only at this point */
+        let mAx=0, mAy=0, mBx=0, mBy=0;
+        for (let i = 0; i < LM; i++) { mAx+=pts1[i][0]; mAy+=pts1[i][1]; mBx+=pts2[i][0]; mBy+=pts2[i][1]; }
+        mAx/=LM; mAy/=LM; mBx/=LM; mBy/=LM;
+        let sxx=0, sa=0, sb=0;
+        for (let i = 0; i < LM; i++) {
+          const ax=pts1[i][0]-mAx, ay=pts1[i][1]-mAy;
+          const bx=pts2[i][0]-mBx, by=pts2[i][1]-mBy;
+          sxx += ax*ax + ay*ay;
+          sa  += ax*bx + ay*by;
+          sb  += ax*by - ay*bx;
+        }
+        const ka = sa/sxx, kb = sb/sxx;
+        const simT = (x, y) => [ mBx + ka*(x-mAx) - kb*(y-mAy), mBy + kb*(x-mAx) + ka*(y-mAy) ];
+        let faceR = 0;
+        for (let i = 0; i < LM; i++) faceR = Math.max(faceR, Math.hypot(pts1[i][0]-mAx, pts1[i][1]-mAy));
+
+        /* flow correspondence; damp near borders; reject outliers */
+        const pre = [];
+        for (const [x, y] of cand) {
+          if (inHull(hullA, x, y)) continue;
+          const i = y*MW + x;
+          const damp = Math.min(1, Math.min(x, y, MW-1-x, MH-1-y) / 20);
+          const dx = flowU[i]*damp, dy = flowV[i]*damp;
+          pre.push([x, y, dx, dy, Math.hypot(dx, dy)]);
+        }
+        /* local-consistency: snap each point's flow to the median of its
+           ≤45px neighbours when it disagrees by >12px — an isolated
+           rogue correspondence shears hard-edged shards into the mesh
+           (read as a phantom "extra hand" at the card edge, 2026-07-20).
+           Regions that genuinely move together are unaffected: their
+           neighbourhood median IS their own motion.                   */
+        const fdx = new Float32Array(pre.length), fdy = new Float32Array(pre.length);
+        for (let a = 0; a < pre.length; a++) {
+          const nx = [], ny = [];
+          for (let b = 0; b < pre.length; b++) {
+            const ddx = pre[b][0]-pre[a][0], ddy = pre[b][1]-pre[a][1];
+            if (ddx*ddx + ddy*ddy <= 45*45) { nx.push(pre[b][2]); ny.push(pre[b][3]); }
+          }
+          nx.sort((p, q) => p - q); ny.sort((p, q) => p - q);
+          const mdx = nx[nx.length >> 1], mdy = ny[ny.length >> 1];
+          const dev = Math.hypot(pre[a][2]-mdx, pre[a][3]-mdy);
+          fdx[a] = dev > 12 ? mdx : pre[a][2];
+          fdy[a] = dev > 12 ? mdy : pre[a][3];
+        }
+        const mags = pre.map((p, a) => Math.hypot(fdx[a], fdy[a])).sort((a, b) => a - b);
+        const med = mags.length ? mags[mags.length >> 1] : 0;
+        const CAP = Math.max(25, med * 3);
+        let added = 0;
+        for (let a = 0; a < pre.length; a++) {
+          const [x, y] = pre[a];
+          const dx = fdx[a], dy = fdy[a], m = Math.hypot(dx, dy);
+          /* rigid-with-head weight: ≤1.2×faceR fully rigid, ≥2.8×faceR pure flow */
+          const w = m > CAP ? 0
+                  : Math.min(1, Math.max(0, (Math.hypot(x-mAx, y-mAy)/faceR - 1.2) / 1.6));
+          const [rx, ry] = simT(x, y);
+          const qx = Math.max(1, Math.min(MW - 2, rx*(1-w) + (x+dx)*w));
+          const qy = Math.max(1, Math.min(MH - 2, ry*(1-w) + (y+dy)*w));
+          if (inHull(hullB, qx, qy)) continue;
+          pts1.push([x, y]); pts2.push([qx, qy]); added++;
+        }
+        console.log('[morph] hybrid: +' + added + ' flow-carried points outside the face');
+      } catch(e) { console.warn('[morph] background flow failed — face-only morph:', e); }
+
+      buildMeshFrames(pts1, pts2);
+
+    } else {
+      /* ══ PATH B: object morph — SHAPE MESH first (2026-07-20, user:
+         "the cars do not line up"), pyramidal-flow fallback ══════════
+         Dense brightness flow cannot find semantic correspondences
+         between two DIFFERENT objects (car↔bike mid-frames were mush).
+         FantaMorph's own car↔bike export is an outline-aligned mesh
+         dissolve — so: segment the object from the background, sample
+         its outline with rays from the centroid, and feed the SAME
+         Delaunay mesh machinery PATH A uses. Flow remains the fallback
+         when segmentation is untrustworthy (busy backgrounds).       */
+      const shape = tryShapeMorph();
+      if (shape) {
+        console.log('[morph] shape morph: fg A ' + Math.round(shape.fa*100) +
+                    '% B ' + Math.round(shape.fb*100) + '%');
+        const hint = document.getElementById('previewHint');
+        if (hint) hint.textContent = 'Object morph: outlines aligned, morphing as the card tilts';
+        buildMeshFrames(shape.p1, shape.p2);
+      } else {
+        console.log('[morph] segmentation unsuitable — pyramidal optical flow');
+        const { u, v } = await computeMorphFlow();
+        buildFramesPhase(u, v);
+      }
+    }
+
+    /* ── Shared mesh-morph frame builder (PATH A + shape PATH B) ─────
+       Takes corresponding point sets in image A and B, appends the
+       fixed canvas boundary/corner points, triangulates the midpoints
+       and batch-renders all FRAMES+1 warped dissolve frames.         */
+    function buildMeshFrames(pts1, pts2) {
+      /* Boundary control points (same positions for both images) */
       const BN = 6;
       for (let i = 0; i <= BN; i++) {
         const tx = i/BN * MW, ty = i/BN * MH;
         pts1.push([tx,0],[tx,MH],[0,ty],[MW,ty]);
         pts2.push([tx,0],[tx,MH],[0,ty],[MW,ty]);
       }
-      /* Corner points */
       const corners = [[0,0],[MW,0],[MW,MH],[0,MH]];
       pts1.push(...corners); pts2.push(...corners);
 
-      /* Delaunay on midpoints for consistent topology */
+      /* Delaunay on midpoints for consistent topology.
+         Sub-pixel deterministic jitter (±0.3px) breaks the cocircular
+         grid configurations that the hybrid's cell grid + boundary grid
+         create — without it Bowyer-Watson's float circumcircle test
+         produces an inconsistent mesh (thousands of overlapping slivers
+         + black pinhole gaps). Jitter affects TOPOLOGY ONLY: per-frame
+         geometry still interpolates the exact pts1/pts2 coordinates.  */
+      const jit = i => ((((i * 2654435761) >>> 16) & 255) / 255 - 0.5) * 0.6;
       const midPts = pts1.map((p,i) => [
-        (p[0]+pts2[i][0])/2, (p[1]+pts2[i][1])/2
+        (p[0]+pts2[i][0])/2 + jit(i), (p[1]+pts2[i][1])/2 + jit(i + 7919)
       ]);
       const tris = delaunay(midPts);
       console.log('[morph]', tris.length, 'triangles');
 
       showProgress(20, 'Rendering ' + tris.length + ' triangles × ' + (FRAMES+1) + ' frames…');
-      await new Promise(r => setTimeout(r, 0));
 
       const buildFrames = new Array(FRAMES + 1);
       let f = 0;
 
-      function batchLandmark() {
+      function batchMesh() {
         const end = Math.min(f + 3, FRAMES + 1);
         for (; f < end; f++) {
           const alfa = f / FRAMES;
@@ -2222,7 +2560,7 @@ function renderMorph(cc) {
           /* Fill with black first */
           for (let i = 3; i < od.length; i += 4) od[i] = 255;
 
-          /* Midpoint landmark positions for this alpha */
+          /* Midpoint mesh positions for this alpha */
           const ia = 1 - alfa;
           const mPts = pts1.map((p,i) => [
             p[0]*ia + pts2[i][0]*alfa,
@@ -2240,26 +2578,140 @@ function renderMorph(cc) {
           buildFrames[f] = outId;
         }
         showProgress(Math.round(20 + (f/(FRAMES+1))*80),
-          'Landmark morph… ' + f + '/' + (FRAMES+1));
-        if (f <= FRAMES) setTimeout(batchLandmark, 0);
+          'Mesh morph… ' + f + '/' + (FRAMES+1));
+        if (f <= FRAMES) setTimeout(batchMesh, 0);
         else {
           morphFrames = buildFrames;
         }
       }
-      setTimeout(batchLandmark, 0);
+      setTimeout(batchMesh, 0);
+    }
 
-    } else {
-      /* ══ PATH B: Horn-Schunck optical flow (products / non-faces) ══ */
+    /* ── Object segmentation: flood-fill background from the borders
+       with LOCAL tolerance — smooth studio gradients (vignetted walls,
+       plain backdrops) flood through, sharp object edges stop the
+       flood. Foreground = largest component not reached. Validated
+       offline on the car/bike reference pair (scratchpad proto_shape) */
+    function segmentFg(d) {
+      const bg = new Uint8Array(N);
+      const qx = new Int32Array(N), qy = new Int32Array(N);
+      let head = 0, tail = 0;
+      const TOL = 14;   /* max per-channel step between neighbour bg px */
+      const push = (x, y) => { const i = y*MW+x; if (!bg[i]) { bg[i] = 1; qx[tail]=x; qy[tail]=y; tail++; } };
+      for (let x = 0; x < MW; x++) { push(x, 0); push(x, MH-1); }
+      for (let y = 0; y < MH; y++) { push(0, y); push(MW-1, y); }
+      while (head < tail) {
+        const x = qx[head], y = qy[head]; head++;
+        const p = (y*MW+x)*4;
+        for (const [nx, ny] of [[x-1,y],[x+1,y],[x,y-1],[x,y+1]]) {
+          if (nx < 0 || ny < 0 || nx >= MW || ny >= MH) continue;
+          const j = ny*MW+nx;
+          if (bg[j]) continue;
+          const q = j*4;
+          if (Math.abs(d[p]-d[q]) < TOL && Math.abs(d[p+1]-d[q+1]) < TOL &&
+              Math.abs(d[p+2]-d[q+2]) < TOL) { bg[j] = 1; qx[tail]=nx; qy[tail]=ny; tail++; }
+        }
+      }
+      let mask = new Uint8Array(N);
+      for (let i = 0; i < N; i++) mask[i] = bg[i] ? 0 : 1;
+      /* close small holes: dilate then erode */
+      const morphOp = (m, want) => {
+        const out = new Uint8Array(N);
+        for (let y = 1; y < MH-1; y++)
+          for (let x = 1; x < MW-1; x++) {
+            const i = y*MW+x;
+            const s2 = m[i-MW-1]+m[i-MW]+m[i-MW+1]+m[i-1]+m[i]+m[i+1]+m[i+MW-1]+m[i+MW]+m[i+MW+1];
+            out[i] = want(s2) ? 1 : 0;
+          }
+        return out;
+      };
+      mask = morphOp(mask, s2 => s2 >= 1);
+      mask = morphOp(mask, s2 => s2 >= 5);
+      /* largest connected component */
+      const lab = new Int32Array(N).fill(-1);
+      let best = 0, bestId = -1, id = 0;
+      for (let i = 0; i < N; i++) {
+        if (!mask[i] || lab[i] >= 0) continue;
+        let h2 = 0, t2 = 0, count = 0;
+        qx[t2] = i % MW; qy[t2] = (i / MW) | 0; t2++;
+        lab[i] = id;
+        while (h2 < t2) {
+          const x = qx[h2], y = qy[h2]; h2++; count++;
+          for (const [nx, ny] of [[x-1,y],[x+1,y],[x,y-1],[x,y+1]]) {
+            if (nx < 0 || ny < 0 || nx >= MW || ny >= MH) continue;
+            const j = ny*MW+nx;
+            if (mask[j] && lab[j] < 0) { lab[j] = id; qx[t2] = nx; qy[t2] = ny; t2++; }
+          }
+        }
+        if (count > best) { best = count; bestId = id; }
+        id++;
+      }
+      const fg = new Uint8Array(N);
+      for (let i = 0; i < N; i++) fg[i] = lab[i] === bestId ? 1 : 0;
+      return { fg, frac: best / N };
+    }
 
-      /* ── Optical-flow guided morphing ──────────────────────────────
-         Horn-Schunck dense optical flow: computes how every pixel
-         actually needs to move from image A to image B. The morph then
-         warps A forward and B backward by the computed field, meeting
-         at the midpoint — exactly as FantaMorph does internally.
-         Works perfectly for similar images (same subject, product, face).
+    /* ── Outline points: centroid + 36 rays; per ray the farthest fg
+       pixel (boundary) and its midpoint (interior stability). Point k
+       in image A corresponds to point k in image B by construction. ── */
+    function shapePoints(fg) {
+      let cx = 0, cy = 0, n = 0;
+      for (let y = 0; y < MH; y++)
+        for (let x = 0; x < MW; x++)
+          if (fg[y*MW+x]) { cx += x; cy += y; n++; }
+      cx /= n; cy /= n;
+      const RAYS = 36, pts = [[cx, cy]];
+      for (let k = 0; k < RAYS; k++) {
+        const th = k / RAYS * 2 * Math.PI;
+        const dx = Math.cos(th), dy = Math.sin(th);
+        let lastR = 0;
+        for (let r = 1; r < Math.max(MW, MH) * 1.5; r++) {
+          const x = Math.round(cx + dx*r), y = Math.round(cy + dy*r);
+          if (x < 0 || y < 0 || x >= MW || y >= MH) break;
+          if (fg[y*MW+x]) lastR = r;
+        }
+        if (lastR === 0) lastR = 2;
+        pts.push([cx + dx*lastR, cy + dy*lastR]);
+        pts.push([cx + dx*lastR*0.5, cy + dy*lastR*0.5]);
+      }
+      return pts;
+    }
+
+    /* Gate: both foregrounds must be a plausible single object or we
+       fall back to optical flow (busy/outdoor backgrounds).          */
+    function tryShapeMorph() {
+      const A = segmentFg(d1), B = segmentFg(d2);
+      const ok = r => r.frac >= 0.03 && r.frac <= 0.6;
+      if (!ok(A) || !ok(B)) return null;
+      return { p1: shapePoints(A.fg), p2: shapePoints(B.fg), fa: A.frac, fb: B.frac };
+    }
+
+    /* ── Shared pyramidal Horn-Schunck flow A→B ──────────────────────
+       Used by PATH B for the whole morph, and by PATH A (2026-07-18) to
+       give non-face feature points their correspondences. Function
+       declaration — hoisted, callable from both branches above.       */
+    async function computeMorphFlow() {
+      /* ── Coarse-to-fine Horn-Schunck with iterative warping ────────
+         (rebuilt 2026-07-17). The old SINGLE-SCALE HS at full res could
+         only recover ~1-2px of motion, so for two DIFFERENT subjects
+         (e.g. two cars) the flow came out ≈0 everywhere and the "morph"
+         was just a crossfade — wheels never travelled. This version:
+         1. Brute-force global min-SSD shift at the coarsest pyramid
+            level (±8px there ≈ ±128px at full res) locks onto subjects
+            that sit at different positions/sizes in the two photos.
+         2. 5-level pyramid, each level warps A toward B by the current
+            flow and HS solves only the residual → large displacements
+            resolve coarse, detail refines fine.
+         3. Grayscales are mean/std-normalised per level so different
+            backgrounds/brightness can't kill the data term.
+         Constants tuned OFFLINE against real image pairs (scratchpad
+         flow_proto.py / flow_tune2.py, 2026-07-17): WARPS=3, ITERS=80,
+         λ²=1.0 → a synthetic 18px shift is recovered exactly and the
+         two-different-cars alignment improved 38%→53%. Do not retune
+         blind in the browser.
          ────────────────────────────────────────────────────────────── */
 
-      /* Step 1: grayscale */
+      /* grayscale at full work res */
       const gray1 = new Float32Array(N);
       const gray2 = new Float32Array(N);
       for (let i = 0; i < N; i++) {
@@ -2268,71 +2720,169 @@ function renderMorph(cc) {
         gray2[i] = (d2[p]*0.299 + d2[p+1]*0.587 + d2[p+2]*0.114) / 255;
       }
 
-      /* Step 2: spatial + temporal gradients (central differences) */
-      const Ix = new Float32Array(N);
-      const Iy = new Float32Array(N);
-      const It = new Float32Array(N);
-      for (let y = 1; y < MH - 1; y++) {
-        for (let x = 1; x < MW - 1; x++) {
-          const i = y * MW + x;
-          Ix[i] = (gray1[i+1] - gray1[i-1] + gray2[i+1] - gray2[i-1]) * 0.25;
-          Iy[i] = (gray1[i+MW] - gray1[i-MW] + gray2[i+MW] - gray2[i-MW]) * 0.25;
-          It[i] = gray2[i] - gray1[i];
-        }
-      }
+      const tick = () => new Promise(r => setTimeout(r, 0));
 
-      /* Step 3: Horn-Schunck iterations (Jacobi, batched for UI responsiveness)
-         λ² = 1.0 — strong smoothness so flow field is continuous across the image */
-      const lambda2 = 1.0;
-      const u = new Float32Array(N);
-      const v = new Float32Array(N);
-      const uBar = new Float32Array(N);
-      const vBar = new Float32Array(N);
-      let hsIter = 0;
-      const HS_ITERS = 150;
+      const down2 = (src, w, h) => {
+        const w2 = Math.floor(w / 2), h2 = Math.floor(h / 2);
+        const dst = new Float32Array(w2 * h2);
+        for (let y = 0; y < h2; y++) {
+          const r0 = 2 * y * w, r1 = (2 * y + 1) * w;
+          for (let x = 0; x < w2; x++) {
+            const c = 2 * x;
+            dst[y * w2 + x] = (src[r0 + c] + src[r0 + c + 1] + src[r1 + c] + src[r1 + c + 1]) * 0.25;
+          }
+        }
+        return { d: dst, w: w2, h: h2 };
+      };
+
+      const normalizeImg = (src) => {
+        let m = 0; for (let i = 0; i < src.length; i++) m += src[i]; m /= src.length;
+        let s = 0; for (let i = 0; i < src.length; i++) { const d = src[i] - m; s += d * d; }
+        s = Math.sqrt(s / src.length) || 1;
+        const out = new Float32Array(src.length);
+        for (let i = 0; i < src.length; i++) out[i] = (src[i] - m) / s;
+        return out;
+      };
+
+      const bilinF = (src, w, h, x, y) => {
+        x = x < 0 ? 0 : (x > w - 1.001 ? w - 1.001 : x);
+        y = y < 0 ? 0 : (y > h - 1.001 ? h - 1.001 : y);
+        const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0;
+        const i = y0 * w + x0;
+        return src[i] * (1 - fx) * (1 - fy) + src[i + 1] * fx * (1 - fy)
+             + src[i + w] * (1 - fx) * fy   + src[i + w + 1] * fx * fy;
+      };
+
+      /* backward warp: sample g at (x − u, y − v) */
+      const warpBack = (g, w, h, wu, wv) => {
+        const out = new Float32Array(w * h);
+        for (let y = 0; y < h; y++)
+          for (let x = 0; x < w; x++) {
+            const i = y * w + x;
+            out[i] = bilinF(g, w, h, x - wu[i], y - wv[i]);
+          }
+        return out;
+      };
+
+      /* bilinear flow upsample; values scaled by the resolution ratio */
+      const upFlow = (src, sw, sh, dw, dh, scale) => {
+        const out = new Float32Array(dw * dh);
+        const rx = sw / dw, ry = sh / dh;
+        for (let y = 0; y < dh; y++)
+          for (let x = 0; x < dw; x++)
+            out[y * dw + x] = bilinF(src, sw, sh, (x + 0.5) * rx - 0.5, (y + 0.5) * ry - 0.5) * scale;
+        return out;
+      };
+
+      /* 3×3 box blur, edges copied */
+      const blurFlow = (src, w, h) => {
+        const dst = new Float32Array(src.length);
+        for (let y = 1; y < h - 1; y++)
+          for (let x = 1; x < w - 1; x++) {
+            const i = y * w + x;
+            dst[i] = (src[i-w-1] + src[i-w] + src[i-w+1] +
+                      src[i-1]   + src[i]   + src[i+1]   +
+                      src[i+w-1] + src[i+w] + src[i+w+1]) / 9;
+          }
+        for (let x = 0; x < w; x++) { dst[x] = src[x]; dst[(h-1)*w+x] = src[(h-1)*w+x]; }
+        for (let y = 0; y < h; y++) { dst[y*w] = src[y*w]; dst[y*w+w-1] = src[y*w+w-1]; }
+        return dst;
+      };
+
+      /* brute-force global min-SSD shift (coarsest level only) */
+      const globalShift = (g1, g2, w, h, rng) => {
+        let bx = 0, by = 0, bd = Infinity;
+        for (let dy = -rng; dy <= rng; dy++)
+          for (let dx = -rng; dx <= rng; dx++) {
+            const x0 = Math.max(0, -dx), x1 = Math.min(w, w - dx);
+            const y0 = Math.max(0, -dy), y1 = Math.min(h, h - dy);
+            if (x1 - x0 < w / 2 || y1 - y0 < h / 2) continue;
+            let s = 0, c = 0;
+            for (let y = y0; y < y1; y++)
+              for (let x = x0; x < x1; x++) {
+                const d = g1[y * w + x] - g2[(y + dy) * w + (x + dx)];
+                s += d * d; c++;
+              }
+            s /= c;
+            if (s < bd) { bd = s; bx = dx; by = dy; }
+          }
+        return { dx: bx, dy: by };
+      };
+
+      /* incremental HS between (already-warped) g1w and g2 — Jacobi */
+      const hsInc = (g1w, g2l, w, h, iters, lam2) => {
+        const n = w * h;
+        const Ix = new Float32Array(n), Iy = new Float32Array(n), It = new Float32Array(n);
+        for (let y = 0; y < h; y++)
+          for (let x = 0; x < w; x++) {
+            const i = y * w + x;
+            if (x > 0 && x < w - 1) Ix[i] = (g1w[i+1] - g1w[i-1] + g2l[i+1] - g2l[i-1]) * 0.25;
+            if (y > 0 && y < h - 1) Iy[i] = (g1w[i+w] - g1w[i-w] + g2l[i+w] - g2l[i-w]) * 0.25;
+            It[i] = g2l[i] - g1w[i];
+          }
+        const du = new Float32Array(n), dv = new Float32Array(n);
+        const duB = new Float32Array(n), dvB = new Float32Array(n);
+        for (let it = 0; it < iters; it++) {
+          for (let y = 0; y < h; y++)
+            for (let x = 0; x < w; x++) {
+              const i = y * w + x;
+              let su = 0, sv = 0, c = 0;
+              if (x > 0)     { su += du[i-1]; sv += dv[i-1]; c++; }
+              if (x < w - 1) { su += du[i+1]; sv += dv[i+1]; c++; }
+              if (y > 0)     { su += du[i-w]; sv += dv[i-w]; c++; }
+              if (y < h - 1) { su += du[i+w]; sv += dv[i+w]; c++; }
+              duB[i] = c ? su / c : 0; dvB[i] = c ? sv / c : 0;
+            }
+          for (let i = 0; i < n; i++) {
+            const P = Ix[i] * duB[i] + Iy[i] * dvB[i] + It[i];
+            const D = lam2 + Ix[i] * Ix[i] + Iy[i] * Iy[i];
+            du[i] = duB[i] - Ix[i] * P / D;
+            dv[i] = dvB[i] - Iy[i] * P / D;
+          }
+        }
+        return { du, dv };
+      };
 
       showProgress(5, 'Computing optical flow…');
+      await tick();
 
-      function runHS() {
-        const batchEnd = Math.min(hsIter + 25, HS_ITERS);
-        for (; hsIter < batchEnd; hsIter++) {
-          /* Neighbourhood average (4-connected) */
-          for (let y = 0; y < MH; y++) {
-            for (let x = 0; x < MW; x++) {
-              const i = y * MW + x;
-              let su = 0, sv = 0, cnt = 0;
-              if (x > 0)      { su += u[i-1];  sv += v[i-1];  cnt++; }
-              if (x < MW-1)   { su += u[i+1];  sv += v[i+1];  cnt++; }
-              if (y > 0)      { su += u[i-MW]; sv += v[i-MW]; cnt++; }
-              if (y < MH-1)   { su += u[i+MW]; sv += v[i+MW]; cnt++; }
-              uBar[i] = cnt ? su / cnt : 0;
-              vBar[i] = cnt ? sv / cnt : 0;
-            }
-          }
-          /* Update rule */
-          for (let i = 0; i < N; i++) {
-            const P = Ix[i]*uBar[i] + Iy[i]*vBar[i] + It[i];
-            const D = lambda2 + Ix[i]*Ix[i] + Iy[i]*Iy[i];
-            u[i] = uBar[i] - Ix[i] * P / D;
-            v[i] = vBar[i] - Iy[i] * P / D;
-          }
-        }
+      /* build pyramid: full res down to ~20px wide, max 5 levels */
+      const levels = [{ d1: gray1, d2: gray2, w: MW, h: MH }];
+      while (levels.length < 5 && Math.min(levels[levels.length-1].w, levels[levels.length-1].h) >= 24) {
+        const L = levels[levels.length - 1];
+        const a = down2(L.d1, L.w, L.h), b = down2(L.d2, L.w, L.h);
+        levels.push({ d1: a.d, d2: b.d, w: a.w, h: a.h });
+      }
 
-        showProgress(
-          Math.round(5 + (hsIter / HS_ITERS) * 15),
-          'Optical flow… ' + hsIter + ' / ' + HS_ITERS
-        );
-
-        if (hsIter < HS_ITERS) {
-          setTimeout(runHS, 0);
+      const WARPS = 3, ITERS = 80, LAM2 = 1.0;
+      let u = null, v = null;
+      for (let li = levels.length - 1; li >= 0; li--) {
+        const L = levels[li];
+        const g1 = normalizeImg(L.d1), g2l = normalizeImg(L.d2);
+        if (li === levels.length - 1) {
+          const { dx, dy } = globalShift(g1, g2l, L.w, L.h, 8);
+          u = new Float32Array(L.w * L.h).fill(dx);
+          v = new Float32Array(L.w * L.h).fill(dy);
         } else {
-          buildFramesPhase();
+          const P = levels[li + 1];
+          u = upFlow(u, P.w, P.h, L.w, L.h, L.w / P.w);
+          v = upFlow(v, P.w, P.h, L.w, L.h, L.h / P.h);
+        }
+        for (let wi = 0; wi < WARPS; wi++) {
+          const g1w = warpBack(g1, L.w, L.h, u, v);
+          const { du, dv } = hsInc(g1w, g2l, L.w, L.h, ITERS, LAM2);
+          for (let i = 0; i < u.length; i++) { u[i] += du[i]; v[i] += dv[i]; }
+          u = blurFlow(u, L.w, L.h); v = blurFlow(v, L.w, L.h);
+          showProgress(5 + Math.round(((levels.length - 1 - li) * WARPS + wi + 1)
+                       / (levels.length * WARPS) * 15), 'Optical flow…');
+          await tick();
         }
       }
-      setTimeout(runHS, 0);
+      return { u, v };
+    }
 
-      /* Step 4: smooth the flow, then build frames */
-      function buildFramesPhase() {
+    /* smooth the flow, then build frames (PATH B only) */
+    function buildFramesPhase(u, v) {
         /* 3×3 box blur × 3 passes — removes high-frequency flow noise
            while preserving large-scale warp structure */
         function boxBlur(src) {
@@ -2418,7 +2968,6 @@ function renderMorph(cc) {
           }
         }
         setTimeout(batch, 0);
-      }
     }
   }
 
@@ -2436,7 +2985,10 @@ function renderMorph(cc) {
   let paused = false, _morphT = 0;
   S.frameFn = (now, tilt) => {
     if (!morphFrames) return previewReady ? previewCvs : null;
-    const rawT  = (tilt + 1) / 2;                    /* full-range sweep  */
+    const rawT  = tiltSweepT(tilt);                  /* full-range sweep, normalised
+                                                        to the video's real tilt span
+                                                        (UD only reaches −0.63, so the
+                                                        raw (t+1)/2 never hit pure A)  */
     const lensT = rawT * rawT * (3 - 2 * rawT);      /* gentle ends       */
     if (!paused) _morphT += (lensT - _morphT) * 0.15;
     const fi = Math.max(0, Math.min(FRAMES, Math.round(_morphT * FRAMES)));
@@ -2676,17 +3228,49 @@ function renderDepthMap3d(cc, depthSrc) {
     const [img, dmap] = await Promise.all([ loadImg(S.images[0]), loadImg(depthSrc) ]);
     const ic = document.createElement('canvas'); ic.width = CW; ic.height = CH;
     drawCover(ic.getContext('2d'), img, CW, CH);
-    /* Depth map: same cover crop → aligned, then HEAVILY blurred (24px).
-       The blur radius must exceed the max pixel displacement (~22px), or
-       the fixed-point solve oscillates at silhouette edges and PINS them
-       in place (weak "content-slide" 3D, plus the smearing streaks the
-       user photographed). A wide ramp makes the warp smooth: foreground
-       pops, background recedes, edges bend cleanly — the same trick the
-       LeiaPix-style depth animators use. Do NOT reduce below ~24px.     */
+    /* Depth remap (2026-07-17, user: "fg needs better 3D, bg pushed further
+       back, currently looks stretched"): the AI depth maps cluster around
+       mid-grey, so the warp was using only ~half the available parallax and
+       the big smooth mid-ramps read as rubbery stretching rather than a
+       subject popping out. Fix: (1) normalise to the map's real 2%..98%
+       range, (2) push values through a double-smoothstep S-curve so the
+       background lands near 0 (full push-back) and the subject near 1
+       (full pop-out) with a steep but still smooth ramp between — closer
+       to the two-plane look a real layered lenticular has.               */
+    const dc0 = document.createElement('canvas'); dc0.width = CW; dc0.height = CH;
+    const d0 = dc0.getContext('2d', { willReadFrequently: true });
+    drawCover(d0, dmap, CW, CH);
+    const did = d0.getImageData(0, 0, CW, CH);
+    const dpx = did.data;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < dpx.length; i += 4) hist[dpx[i]]++;
+    const nPix = dpx.length / 4;
+    let acc = 0, lo = 0, hi = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= nPix * 0.02) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= nPix * 0.02) { hi = v; break; } }
+    const span = Math.max(1, hi - lo);
+    const lut = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      let t = (v - lo) / span; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      t = t * t * (3 - 2 * t);          /* smoothstep twice = strong but   */
+      t = t * t * (3 - 2 * t);          /* smooth fg/bg separation         */
+      lut[v] = Math.round(t * 255);
+    }
+    for (let i = 0; i < dpx.length; i += 4) {
+      const v = lut[dpx[i]];
+      dpx[i] = dpx[i+1] = dpx[i+2] = v;
+    }
+    d0.putImageData(did, 0, 0);
+    /* Then HEAVILY blur the remapped map. The blur radius must exceed the
+       max per-side pixel displacement (24px at HEIGHT 0.075 × 640), or the
+       fixed-point solve oscillates at silhouette edges and PINS them in
+       place (weak "content-slide" 3D plus smearing streaks). Do NOT reduce
+       below ~26px while HEIGHT is 0.075.                                  */
     const dc = document.createElement('canvas'); dc.width = CW; dc.height = CH;
     const dctx = dc.getContext('2d');
-    dctx.filter = 'blur(28px)';
-    drawCover(dctx, dmap, CW, CH);
+    dctx.filter = 'blur(34px)';
+    dctx.drawImage(dc0, 0, 0);
     dctx.filter = 'none';
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.texImg);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ic);
@@ -2695,11 +3279,12 @@ function renderDepthMap3d(cc, depthSrc) {
     ready = true;
   })();
 
-  const HEIGHT = 0.05;            /* max parallax as a fraction of card width.
-                                     0.035 read too subtle; 0.05 works because
-                                     the centred warp splits it ±half and the
-                                     28px depth blur exceeds the per-side
-                                     displacement (16px) — no smearing        */
+  const HEIGHT = 0.075;           /* max parallax as a fraction of card width.
+                                     0.05 read too subtle (user 2026-07-17:
+                                     "fg out, bg further back"); 0.075 works
+                                     because the centred warp splits it ±half
+                                     (24px per side at 640) and the 34px depth
+                                     blur still exceeds that — no smearing    */
   let curX = 0, curY = 0, paused = false;
   S.frameFn = (now, tilt) => {
     if (!ready) return null;
@@ -2711,7 +3296,13 @@ function renderDepthMap3d(cc, depthSrc) {
     if (!paused) { curX += (tx - curX) * 0.15; curY += (ty - curY) * 0.15; }
     gl.useProgram(G.prog);
     gl.uniform2f(G.uShift, curX * HEIGHT, curY * HEIGHT);
-    gl.uniform1f(G.uInset, 1.0 - 3.0 * HEIGHT);   /* march + centring headroom */
+    gl.uniform1f(G.uInset, 1.0 - 2.0 * HEIGHT);   /* march + centring headroom:
+                                                     max excursion is 0.5·HEIGHT,
+                                                     margin is HEIGHT per side =
+                                                     2× headroom. (2.0 not 3.0 so
+                                                     the visible field stays the
+                                                     same 0.85 as before the
+                                                     HEIGHT increase.)          */
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.texImg);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, G.texDep);
     gl.viewport(0, 0, CW, CH);
