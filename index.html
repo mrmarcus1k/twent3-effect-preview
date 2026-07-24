@@ -1227,7 +1227,6 @@ function _composeFrame(mediaTime) {
     }
     const map = _quadUV(q0);
     const cardAspect = isUD ? 1.75 : 1.72;
-    const pxA = portPxAspect();   /* print W/H — matches the uploaded image */
     /* ── Print size (2026-07-20, Marc: "expand to the edges so it sits snug").
        The old fixed PW=0.66 left the portrait print sitting small INSIDE the
        grip with black margin. We now make the print as WIDE as possible — up
@@ -1240,9 +1239,9 @@ function _composeFrame(mediaTime) {
        width; on a narrow one it shrinks just enough to stay fully visible.
        PH↔PW are locked to pixel-aspect 0.8 (cardSrcDims 384×480).          */
     const MARGIN = 8;                                  /* px kept clear at frame top */
-    const phFromPw = pw => pw * cardAspect / pxA;
+    const phFromPw = pw => pw * cardAspect / 0.8;
     const topYForPh = ph => {
-      const pw = ph * pxA / cardAspect;
+      const pw = ph * 0.8 / cardAspect;
       const a = map(0.5 - pw / 2, 1 - ph), b = map(0.5 + pw / 2, 1 - ph);
       return Math.min(a.y, b.y);                       /* higher on screen = smaller y */
     };
@@ -1258,7 +1257,7 @@ function _composeFrame(mediaTime) {
       }
       PH = lo;
     }
-    const PW = PH * pxA / cardAspect;
+    const PW = PH * 0.8 / cardAspect;
     const u0 = 0.5 - PW / 2, u1 = 0.5 + PW / 2;
     /* Print bottom edge COLLINEAR with the card's bottom edge (v ∈ [1−PH, 1]):
        the print's bottom corners land exactly where the card's bottom corners
@@ -1954,23 +1953,8 @@ function getDisplayCorners(videoKey, time) {
 
 /* Effect source-canvas dimensions — portrait sources for the upright
    portrait print so the perspective warp doesn't stretch anything.     */
-/* Portrait print pixel-aspect (W/H). Sized to the uploaded image so the whole
-   image fills the placeholder with no crop and no bars; clamped to sane print
-   shapes. Falls back to 0.8 (the old fixed 4:5) before an image has loaded.
-   The SAME value drives cardSrcDims (the source canvas) and the portrait quad
-   geometry in _composeFrame, so source and card shape always agree.          */
-function portPxAspect() {
-  const a = S.imgAspect0;
-  if (!a || !isFinite(a) || a <= 0) return 0.8;
-  return Math.min(1.6, Math.max(0.3, a));
-}
-
 function cardSrcDims() {
-  if (S.cardFit === 'portrait') {
-    const pxA = portPxAspect();
-    return { CW: Math.max(64, Math.round(480 * pxA)), CH: 480 };
-  }
-  return { CW: 640, CH: 363 };
+  return S.cardFit === 'portrait' ? { CW: 384, CH: 480 } : { CW: 640, CH: 363 };
 }
 
 function drawCover(ctx, img, W, H) {
@@ -2027,30 +2011,22 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING (2026-07-24, user request — supersedes the 2026-07-17 full
-     sweep): TURNAROUND SNAP. The full-range crossfade sweep dissolved A->B
-     across the WHOLE rock, so through the middle of the swing BOTH images
-     were drawn on top of each other = a permanent double-exposure ("why is
-     it showing both images"). A real lenticular flip must show ONE clean
-     image at a time. So the crossfade is FROZEN during the swing (one image
-     held steady, tracking the card) and only advances while the card is
-     momentarily PARKED at a rock extreme — the ~0.68s dwell where it is
-     still. `tiltSweepT` normalises tilt to the video's real extremes, so
-     sw<0.15 = one parked end (reveal A), sw>0.85 = the other (reveal B).
-     At 0.18/frame the switch completes in ~0.13s, well inside the dwell, so
-     the swap is crisp AND smooth, with no ghosting while the card moves.
-     (This is the proven 2026-06-13 turnaround method; the sweep is gone.)  */
+     FLIP TIMING (2026-07-17, user request): EXACTLY the morph's transition
+     code. The old sigmoid centre-crossover concentrated the whole dissolve
+     into the fast centre swing — a ~0.2s double-exposure flash while the
+     card moved at its fastest, which read as "shaky" — and the user asked
+     for the morph's smoothness on the flip. So the crossfade now sweeps the
+     card's WHOLE tilt range (normalised to the video's real extremes by
+     tiltSweepT): pure A at one end of the rock, pure B at the other, the
+     dissolve progressing gently through the swing and settling during the
+     end dwells. Same smoothstep + 0.15 follow as renderMorph.             */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    const sw = tiltSweepT(tilt);                 /* 0..1 across the rock */
-    if (!paused) {
-      if      (sw > 0.85) op += (1 - op) * 0.18; /* parked at B end -> reveal B */
-      else if (sw < 0.15) op += (0 - op) * 0.18; /* parked at A end -> reveal A */
-      /* else: mid-swing -> op frozen, one image held steady (no dissolve) */
-    }
-    const o = op < 0 ? 0 : op > 1 ? 1 : op;
-    const a = o * o * (3 - 2 * o);               /* smootherstep visible alpha */
+    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
+    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
+    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
+    const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
     cctx.clearRect(0, 0, CW, CH);
     cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
@@ -3598,10 +3574,6 @@ async function handleFile(file, idx) {
     try {
       const probe = new Image();
       probe.onload = () => {
-        /* Cache the real pixel aspect (W/H) so Portrait sizes the placeholder
-           to the image — whole image shown, no crop, no bars. See portPxAspect. */
-        if (probe.naturalWidth && probe.naturalHeight)
-          S.imgAspect0 = probe.naturalWidth / probe.naturalHeight;
         const fit = probe.naturalHeight > probe.naturalWidth ? 'portrait' : 'landscape';
         if (fit !== S.cardFit) {
           S.cardFit = fit;
@@ -3685,7 +3657,6 @@ function buildUploadPanel() {
   const eff = EFFECTS[S.effectIdx];
   S.images    = [];
   S.psdLayers = [];
-  S.imgAspect0 = null;   /* portrait placeholder sizes to the next upload */
   S.depthMaps = [];
   S.seqFrames = [];
 
