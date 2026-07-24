@@ -527,11 +527,17 @@
     /* ─── Responsive ──────────────────────────────────────────── */
     @media (max-width:860px) {
       .main { grid-template-columns:1fr; }
-      .upload-panel { border-right:none; border-bottom:1px solid var(--dark-4); }
+      /* Preview is the hero — show it first on stacked layouts so it isn't
+         buried below the full upload panel (measured ~1250px down otherwise). */
+      .preview-panel { order:1; position:sticky; top:58px; z-index:20; }
+      .upload-panel  { order:2; border-right:none; border-top:1px solid var(--dark-4); }
+      .hand-scene    { min-height:320px; }
     }
     @media (max-width:540px) {
+      .header  { padding:.85rem 1rem; }
       .header-sub { display:none; }
       .effect-grid { grid-template-columns: repeat(2, 1fr); }
+      .upload-panel { padding:1.1rem 1rem; }
     }
   </style>
 </head>
@@ -4184,6 +4190,25 @@ function selectEffect(i) {
 })();
 buildUploadPanel();
 showPlaceholder();
+
+/* ─── Iframe auto-height (Shopify embed) ──────────────────────────
+   Reports content height to the parent page so the embedding iframe
+   can size to fit — no inner scrollbar on any device. Harmless when
+   the app runs standalone (no parent listener). See handoff / embed
+   snippet for the matching parent-side listener.                    */
+(() => {
+  let last = 0;
+  const post = () => {
+    const h = document.documentElement.scrollHeight;
+    if (Math.abs(h - last) < 2) return;
+    last = h;
+    try { parent.postMessage({ t3preview_height: h }, '*'); } catch (e) {}
+  };
+  window.addEventListener('load', post);
+  window.addEventListener('resize', post);
+  try { new ResizeObserver(post).observe(document.body); } catch (e) {}
+  setInterval(post, 1000);
+})();
 </script>
 </body>
 </html>
