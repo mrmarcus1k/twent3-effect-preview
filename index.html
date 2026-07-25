@@ -2011,55 +2011,46 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING — SIGMOID CROSSOVER AT THE CENTRE. Restored 2026-07-25 to
-     the exact code that was LIVE on twent3.co.uk from 2026-07-16 (deploy
-     6373c6e/cbd7614) because that is the transition Marc has always been
-     referring to as correct: "revert back to how it was previously when it
-     transitioned perfectly".
-     ⚠⚠ ROOT CAUSE OF A LONG BACK-AND-FORTH — the 2026-07-24 go-live
-     SILENTLY CHANGED THE FLIP. The deployed site was running this sigmoid,
-     but the local file had the 2026-07-17 rewrite that replaced it with a
-     full-range `tiltSweepT` sweep, so publishing the local file swapped the
-     transition without anyone intending it. Every later "revert" went back
-     to that SWEEP, never to what Marc actually had — which is why the same
-     two complaints kept surviving each revert:
-       · "dissolve transitions LATE" — the sweep spreads the dissolve over
-         the WHOLE rock and only completes at the extremes; the sigmoid
-         completes it at the CENTRE, where the eye expects a lenticular flip.
-       · "GRID LINES in the background" — the sweep leaves the source
-         part-transparent ~88% of the cycle, and perspectiveDraw's
-         deliberately-overlapping triangle clips (0.75px, added to kill AA
-         seams) DOUBLE-BLEND semi-transparent pixels into a visible grid.
-         The sigmoid passes through the blend fast, so alpha is 0 or 1
-         almost always and the seams never show.
-     ⚠ Do NOT "improve" this into a full-range sweep again. Steepness 3.5 and
-     follow 0.22 were themselves a 2026-07-04 smoothness tune (from 7 / 0.5,
-     which snapped too hard). Knobs: steepness (lower = softer/wider dissolve)
-     and the follow rate.                                                   */
+     🔒 LOCKED 2026-07-25 — Marc: "this works now". This exact pairing (the
+     2026-07-16 sigmoid timing below + the ebfd974 two-plain-source-over draw
+     block further down) is the ONLY approved flip. It cost a full day of
+     back-and-forth to recover. DO NOT change either part, and do NOT
+     "improve" the blending — see CLAUDE.md "FLIP IS LOCKED" for the table of
+     everything already tried and rejected.
+
+     FLIP TIMING = THE FULL-RANGE SWEEP (2026-07-17 code), CONFIRMED BY MARC
+     2026-07-25 as "the smooth transition" by pointing at his cached build of
+     commit aef0a74 (`?v=rev1`). This is the timing he wants — full stop.
+     ⚠ I previously concluded the opposite (that the 2026-07-16 sigmoid centre
+     crossover was his reference) because that is what happened to be DEPLOYED
+     on twent3.co.uk. That reasoning was wrong: what was deployed was not what
+     he preferred. He preferred this sweep all along, and his "showing both
+     images" complaint was never about timing at all — it was the ALPHA BUG
+     below (image A drawn at full opacity, so with cut-out artwork it never
+     disappeared). Fixing the alpha is what that complaint needed; every
+     timing change I made in between was chasing the wrong thing.
+     ⚠ Do NOT "restore" the sigmoid. Do NOT narrow this into a band, snap it
+     at the turnarounds, or add an overshoot to the target (that one made the
+     dissolve start LATE). See CLAUDE.md "FLIP IS LOCKED".                  */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre).
-       Steepness 3.5 (was 7) + slower follow 0.22 (was 0.5): user 2026-07-04
-       wanted a visibly smoother flip — the old values snapped A→B too hard. */
-    const lensT = 1 / (1 + Math.exp(-3.5 * tilt)); /* 0 at −tilt, 1 at +tilt */
-    if (!paused) op += (lensT - op) * 0.22;         /* smooth follow */
-    op = op < 0 ? 0 : op > 1 ? 1 : op;
+    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
+    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
+    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
+    const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
-    /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
-    const a = op*op*op * (op*(op*6 - 15) + 10);
-
-    /* A fades OUT as B fades in — result = A·(1−a) + B·a, on colour AND alpha.
-       Why not the old `A at alpha 1, fade B on top`: that assumes B is an
-       OPAQUE rectangle. With CUT-OUT artwork (transparent background) B can
-       never cover A, so image A never disappeared.
-       ⚠ Why 'lighter' and not two plain source-over draws: source-over does
-       NOT interpolate — at the midpoint the composite alpha would be
-       (1−a) + a·(1−(1−a)) = 0.75, i.e. the print goes SEE-THROUGH mid-flip and
-       the backdrop shows through it. 'lighter' ADDS the two pre-weighted
-       layers, so alpha lands at (1−a)+a = 1 exactly for opaque photos (no
-       transparency dip) while still interpolating correctly for cut-outs.
-       Timing is untouched from the restored 2026-07-16 sigmoid.            */
+    /* THE DISAPPEAR FIX — image A fades OUT as B fades in (commit ebfd974,
+       the one Marc confirmed working on the black/white Jesus pair).
+       The original drew A at globalAlpha 1 and only faded B on top, which
+       assumes B is an OPAQUE rectangle: with CUT-OUT artwork (transparent
+       background) B can never cover A, so image A never disappeared. This is
+       what "it's showing both images" actually was — an alpha bug, not a
+       timing bug.
+       ⚠ Keep these as TWO PLAIN source-over draws. An additive 'lighter'
+       variant was tried (to remove the ~0.75 mid-dissolve alpha dip that
+       source-over leaves) and it broke the disappearing again — Marc
+       rejected it. Do not reintroduce it.                                  */
     cctx.clearRect(0, 0, CW, CH);
     if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
     if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
