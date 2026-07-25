@@ -2028,8 +2028,14 @@ function renderFlip(cc) {
      single tuning knob — smaller = crisper flip / more sudden, larger =
      smoother / more ghosting. FOLLOW must stay fast enough that `op` tracks
      the band instead of lagging across it and re-widening the blend.      */
-  const BAND   = 0.30;   /* fraction of the rock spent transitioning */
-  const FOLLOW = 0.30;   /* how quickly op chases the target         */
+  /* BAND widened 0.30 -> 0.58 and FOLLOW eased 0.30 -> 0.20 (2026-07-25):
+     once the true cross-dissolve landed, a 0.30 band read as a HARD cut with
+     no visible dissolve (Marc). A wide band is safe NOW in a way it was not
+     before — with both layers fading, the ends still resolve to ONE clean
+     image, so a long dissolve is a real dissolve rather than the old
+     permanent double exposure. Bigger BAND = longer, softer dissolve.      */
+  const BAND   = 0.58;   /* fraction of the rock spent transitioning */
+  const FOLLOW = 0.20;   /* how quickly op chases the target         */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
