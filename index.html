@@ -2049,13 +2049,23 @@ function renderFlip(cc) {
     /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
     const a = op*op*op * (op*(op*6 - 15) + 10);
 
-    /* A fades OUT as B fades in. Drawing A at alpha 1 and only fading B on
-       top assumes B is an opaque rectangle — with CUT-OUT artwork (transparent
-       background) B can never cover A, so image A never disappears. This is
-       the ONLY change from the restored 2026-07-16 code; timing untouched. */
+    /* A fades OUT as B fades in — result = A·(1−a) + B·a, on colour AND alpha.
+       Why not the old `A at alpha 1, fade B on top`: that assumes B is an
+       OPAQUE rectangle. With CUT-OUT artwork (transparent background) B can
+       never cover A, so image A never disappeared.
+       ⚠ Why 'lighter' and not two plain source-over draws: source-over does
+       NOT interpolate — at the midpoint the composite alpha would be
+       (1−a) + a·(1−(1−a)) = 0.75, i.e. the print goes SEE-THROUGH mid-flip and
+       the backdrop shows through it. 'lighter' ADDS the two pre-weighted
+       layers, so alpha lands at (1−a)+a = 1 exactly for opaque photos (no
+       transparency dip) while still interpolating correctly for cut-outs.
+       Timing is untouched from the restored 2026-07-16 sigmoid.            */
     cctx.clearRect(0, 0, CW, CH);
+    cctx.globalCompositeOperation = 'source-over';
     if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
+    cctx.globalCompositeOperation = 'lighter';
     if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
+    cctx.globalCompositeOperation = 'source-over';
     cctx.globalAlpha = 1;
     return comp;
   };
