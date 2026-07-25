@@ -1292,7 +1292,7 @@ function _composeFrame(mediaTime) {
        translated so its fingertips pinch the print's side edges.          */
     handCtx.fillStyle = '#050608';
     handCtx.fillRect(0, 0, W, H);
-    if (src) perspectiveDraw(handCtx, src, extCorners, 10);
+    if (src) warpSource(handCtx, src, extCorners, 10);
     if (_composeWorkCtx && _portDL && _portDR) {
       const bandTop = Math.max(0, Math.floor(dy));
       const bandH = Math.min(H, Math.ceil(dy + dh)) - bandTop;
@@ -1317,7 +1317,7 @@ function _composeFrame(mediaTime) {
     }
   } else {
     /* ── LANDSCAPE (unchanged, locked-in 0%-dead pipeline) ── */
-    if (src && warpQuad) perspectiveDraw(handCtx, src, warpQuad, 10);
+    if (src && warpQuad) warpSource(handCtx, src, warpQuad, 10);
     /* ── 2. Chroma-keyed SAME frame (hands + background) on top ── */
     handCtx.drawImage(_composeWork, 0, 0);
   }
@@ -1722,6 +1722,45 @@ function generatePreview() {
      Draws img into a W×H canvas centred and cropped (object-fit:cover).
    ═══════════════════════════════════════════════════════════════ */
 
+/* ── Warp an effect source onto the card quad ────────────────────────────
+   Accepts EITHER a plain canvas (every effect except flip — behaviour is
+   byte-for-byte what it always was) OR a layer bundle
+   `{layers:[{canvas, alpha}, ...]}`.
+
+   WHY THE BUNDLE EXISTS (2026-07-25, Marc: "i can see the grid when it
+   transitions"): perspectiveDraw expands each triangle's clip PAD=0.75px so
+   adjacent cells overlap and the antialiased seams disappear. That overlap
+   redraws the same pixels twice. With an OPAQUE source that is invisible, but
+   a SEMI-TRANSPARENT source accumulates alpha to 1−(1−α)² along every cell
+   boundary → a visible grid, and only ever DURING a dissolve.
+   Fix: warp each layer SEPARATELY at FULL opacity (so the overlap is drawing
+   opaque-over-opaque and cannot accumulate), then composite the finished warps
+   with ONE drawImage each at their alpha — a single draw can't overlap itself.
+   The cross-fade maths is untouched: same alphas, same source-over order, just
+   applied AFTER the warp instead of before. Warping and blending commute, so
+   the result is the same picture minus the seam accumulation.            */
+let _warpScratch = null, _warpScratchCtx = null;
+function warpSource(ctx, src, corners, N) {
+  if (!src) return;
+  if (!src.layers) { perspectiveDraw(ctx, src, corners, N); return; }
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  if (!_warpScratch || _warpScratch.width !== W || _warpScratch.height !== H) {
+    _warpScratch = document.createElement('canvas');
+    _warpScratch.width = W; _warpScratch.height = H;
+    _warpScratchCtx = _warpScratch.getContext('2d');
+  }
+  for (let i = 0; i < src.layers.length; i++) {
+    const L = src.layers[i];
+    if (!L || !L.canvas || !(L.alpha > 0.002)) continue;
+    _warpScratchCtx.clearRect(0, 0, W, H);
+    perspectiveDraw(_warpScratchCtx, L.canvas, corners, N);  /* opaque → safe */
+    const prev = ctx.globalAlpha;
+    ctx.globalAlpha = L.alpha > 1 ? 1 : L.alpha;
+    ctx.drawImage(_warpScratch, 0, 0);                       /* ONE draw     */
+    ctx.globalAlpha = prev;
+  }
+}
+
 function perspectiveDraw(ctx, src, corners, N) {
   N = N || 8;
   const srcW = src.width  || src.naturalWidth  || 320;
@@ -2006,6 +2045,12 @@ function renderFlip(cc) {
   if (imgB.complete) onImgLoad();
 
   let paused = false, op = 0;
+  /* Stable layer bundle, mutated in place so the rAF loop allocates nothing.
+     warpSource() warps each layer at full opacity then composites it with a
+     single draw — that is what keeps the triangle seams from accumulating
+     into a visible grid during the dissolve. See warpSource().           */
+  const flipLayers = { layers: [ { canvas: offA, alpha: 0 },
+                                 { canvas: offB, alpha: 0 } ] };
 
   /* frameFn: composite A→B crossfade on a FLAT canvas, return it.
      The compositor does ONE perspective warp of the result — so there are
@@ -2054,12 +2099,14 @@ function renderFlip(cc) {
        ⚠ Keep these as TWO PLAIN source-over draws. An additive 'lighter'
        variant was tried (to remove the ~0.75 mid-dissolve alpha dip that
        source-over leaves) and it broke the disappearing again — Marc
-       rejected it. Do not reintroduce it.                                  */
-    cctx.clearRect(0, 0, CW, CH);
-    if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
-    if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
-    cctx.globalAlpha = 1;
-    return comp;
+       rejected it. Do not reintroduce it.
+       ⚠ These are the SAME two weights and the SAME source-over order as the
+       approved build — they are just handed to warpSource() as layers so the
+       blend happens AFTER the perspective warp instead of before it. Nothing
+       about the timing, the fade, or the disappearing changes.            */
+    flipLayers.layers[0].alpha = 1 - a;   /* image A fades out */
+    flipLayers.layers[1].alpha = a;       /* image B fades in  */
+    return flipLayers;
   };
 
   addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
