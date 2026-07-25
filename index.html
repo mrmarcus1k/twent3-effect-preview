@@ -2011,12 +2011,16 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     🔒 LOCKED 2026-07-25 — Marc: "this works now". This exact pairing (the
-     2026-07-16 sigmoid timing below + the ebfd974 two-plain-source-over draw
+     🔒 LOCKED 2026-07-25 — Marc: "This is PERFECT". This exact pairing (the
+     full-range SWEEP timing below + the ebfd974 two-plain-source-over draw
      block further down) is the ONLY approved flip. It cost a full day of
-     back-and-forth to recover. DO NOT change either part, and do NOT
-     "improve" the blending — see CLAUDE.md "FLIP IS LOCKED" for the table of
+     back-and-forth to find. DO NOT change either part, and do NOT "improve"
+     the blending — see CLAUDE.md "FLIP IS LOCKED" for the table of
      everything already tried and rejected.
+     The one open item is the faint GRID visible during the dissolve; its
+     cause and the two candidate fixes are documented in CLAUDE.md. It is a
+     perspectiveDraw triangle-overlap artefact, NOT a flip-timing problem —
+     do not "fix" it by changing the timing.
 
      FLIP TIMING = THE FULL-RANGE SWEEP (2026-07-17 code), CONFIRMED BY MARC
      2026-07-25 as "the smooth transition" by pointing at his cached build of
