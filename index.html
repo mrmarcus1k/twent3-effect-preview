@@ -2040,9 +2040,23 @@ function renderFlip(cc) {
     if (!paused) op += (lensT - op) * FOLLOW;       /* smooth follow        */
     const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
+    /* TRUE CROSS-DISSOLVE — A fades OUT as B fades in (fixed 2026-07-25).
+       The old code drew A at globalAlpha 1 ALWAYS and only faded B in on top.
+       That silently relies on B being a fully opaque rectangle: wherever B is
+       TRANSPARENT (cut-out artwork, logos, PNGs with alpha — very common for
+       lenticular designs) B can never cover A, so image A stayed visible at
+       full strength even at the end of the flip. Marc: "the black Jesus is
+       still showing when the white Jesus is there ... why does black Jesus
+       not disappear when it flips". Reproduced with two transparent-background
+       discs: at full B, the ring where B is transparent still read pure A
+       (255,0,0,255). Fading BOTH layers makes the swap complete for opaque
+       and transparent artwork alike.
+       ⚠ Verify this with images that have TRANSPARENT backgrounds — solid
+       opaque test colours cover each other and hide this class of bug.     */
     cctx.clearRect(0, 0, CW, CH);
-    cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
-    if (a > 0.002) { cctx.globalAlpha = a; cctx.drawImage(offB, 0, 0); cctx.globalAlpha = 1; }
+    if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
+    if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
+    cctx.globalAlpha = 1;
     return comp;
   };
 
@@ -3518,9 +3532,13 @@ function renderStereoscopic(cc) {
     const lensT = rawT * rawT * (3 - 2 * rawT);
     if (!paused) _t += (lensT - _t) * 0.2;
     const a = Math.max(0, Math.min(1, _t));
+    /* TRUE cross-dissolve, same fix as renderFlip (2026-07-25): fade the LEFT
+       view out as the right fades in. Drawing L at alpha 1 and only fading R
+       on top leaves L permanently visible wherever R is TRANSPARENT. */
     wctx.clearRect(0, 0, CW, CH);
-    wctx.globalAlpha = 1;  wctx.drawImage(offL, 0, 0);
-    if (a > 0.002) { wctx.globalAlpha = a; wctx.drawImage(offR, 0, 0); wctx.globalAlpha = 1; }
+    if (a < 0.998) { wctx.globalAlpha = 1 - a; wctx.drawImage(offL, 0, 0); }
+    if (a > 0.002) { wctx.globalAlpha = a;     wctx.drawImage(offR, 0, 0); }
+    wctx.globalAlpha = 1;
     return work;
   };
   addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
