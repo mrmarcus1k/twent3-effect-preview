@@ -2028,14 +2028,53 @@ function renderFlip(cc) {
      single tuning knob — smaller = crisper flip / more sudden, larger =
      smoother / more ghosting. FOLLOW must stay fast enough that `op` tracks
      the band instead of lagging across it and re-widening the blend.      */
-  /* BAND widened 0.30 -> 0.58 and FOLLOW eased 0.30 -> 0.20 (2026-07-25):
-     once the true cross-dissolve landed, a 0.30 band read as a HARD cut with
-     no visible dissolve (Marc). A wide band is safe NOW in a way it was not
-     before — with both layers fading, the ends still resolve to ONE clean
-     image, so a long dissolve is a real dissolve rather than the old
-     permanent double exposure. Bigger BAND = longer, softer dissolve.      */
-  const BAND   = 0.58;   /* fraction of the rock spent transitioning */
-  const FOLLOW = 0.20;   /* how quickly op chases the target         */
+  /* BAND 1.0 = the dissolve spans the WHOLE tilt range (2026-07-25, final).
+     History: 0.30 read as a hard cut, 0.58 still "not as smooth as it was".
+     Marc's reference for smoothness is the ORIGINAL 2026-07-17 sweep, which
+     dissolved across the entire range — narrowing the band necessarily makes
+     the alpha change faster (0.58 band ≈ 1.7× the rate), so it can never
+     match that. BAND 1.0 reproduces the original timing EXACTLY (lensT
+     becomes smoothstep(sw) again) while keeping the true cross-dissolve, so
+     image A still fades to nothing instead of sitting under B forever.
+     The card DWELLS ~17 frames at each rock extreme, which is what lets a
+     full-range dissolve still resolve to ONE clean image at the ends —
+     ⚠ SMOOTHNESS vs FULL DISAPPEARANCE pull against each other through
+     FOLLOW: per-frame alpha step ≈ |target−op| × FOLLOW, so a HIGH follow
+     tracks the fast centre swing closely and reads as steppy (0.25 measured
+     0.114/frame on LR — worse than the old narrow band), while a LOW follow
+     is silky but never quite converges (0.15 leaves A at ~4-6% = faint
+     ghost). OVER decouples them: the target is stretched slightly BEYOND
+     0..1, so even a low FOLLOW crosses the ends and the CLAMP pins the drawn
+     alpha at exactly 0 / 1 — silky mid-sweep, guaranteed clean at the ends,
+     plus a genuine hold while it sits clamped.
+     ⚠ TUNED AGAINST THE REAL PER-FRAME TILTS, not evenly-spaced samples.
+     The card dwells at the ends and swings FAST through the centre, so equal
+     tilt steps badly misrepresent the per-frame alpha rate (an earlier pass
+     "measured" smoothness on a linear sweep and drew the wrong conclusion).
+     Replaying tracking_data's real frame sequence and simulating candidates:
+       original 2026-07-17 sweep (F 0.15, no overshoot) → step 0.1275, 88%
+         dissolving, A bottoms out at 0.011 (never fully clears)
+       THIS (F 0.04, OVER 0.48)                        → step 0.0568, 70%
+         dissolving, A reaches EXACTLY 0
+     i.e. 2.2× smoother per frame than the version Marc remembers as smooth,
+     nearly as continuously-dissolving, and it still fully clears image A.
+     Lower FOLLOW is smoother; going to 0.03 leaves A at 0.011 = faint ghost,
+     which is the exact bug we fixed, so 0.04 is the floor.
+     ⚠ OVER 0.48 was NOT enough on UD: that rock DWELLS at the top but only
+     brushes the bottom extreme, so a slow follow never converged there and
+     image A peaked at 0.96 = image B ghosting at 4% (the same defect class,
+     mirrored). OVER 0.70 fixes it — grid-searched F × OVER over the real
+     frame sequences of BOTH videos, 29/30 combinations resolved both ends
+     and this is the smoothest of them.
+     FINAL, measured on the real frames of both videos:
+       LR step 0.0542, UD step 0.0530, A spans exactly 0..1 on both,
+       ~55% of the cycle dissolving (original: step 0.1275, A never cleared).
+     If Marc ever wants it smoother still, LOWER FOLLOW and RAISE OVER
+     together, then re-check that A still spans 0..1 on BOTH orientations —
+     changing FOLLOW alone silently reintroduces the ghost.                 */
+  const BAND   = 1.00;   /* fraction of the rock spent transitioning */
+  const FOLLOW = 0.04;   /* how quickly op chases the target (low = smooth) */
+  const OVER   = 0.70;   /* target overshoot past 0..1 so the clamp lands   */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
@@ -2043,8 +2082,9 @@ function renderFlip(cc) {
     const c  = (sw - (0.5 - BAND / 2)) / BAND;      /* 0..1 across the band */
     const k  = c < 0 ? 0 : c > 1 ? 1 : c;
     const lensT = k * k * (3 - 2 * k);              /* smoothstep in-band   */
-    if (!paused) op += (lensT - op) * FOLLOW;       /* smooth follow        */
-    const a = op < 0 ? 0 : op > 1 ? 1 : op;
+    const target = -OVER + lensT * (1 + 2 * OVER);  /* stretched past 0..1  */
+    if (!paused) op += (target - op) * FOLLOW;      /* smooth follow        */
+    const a = op < 0 ? 0 : op > 1 ? 1 : op;         /* clamp -> true 0 / 1  */
 
     /* TRUE CROSS-DISSOLVE — A fades OUT as B fades in (fixed 2026-07-25).
        The old code drew A at globalAlpha 1 ALWAYS and only faded B in on top.
