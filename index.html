@@ -2061,11 +2061,8 @@ function renderFlip(cc) {
        transparency dip) while still interpolating correctly for cut-outs.
        Timing is untouched from the restored 2026-07-16 sigmoid.            */
     cctx.clearRect(0, 0, CW, CH);
-    cctx.globalCompositeOperation = 'source-over';
     if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
-    cctx.globalCompositeOperation = 'lighter';
     if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
-    cctx.globalCompositeOperation = 'source-over';
     cctx.globalAlpha = 1;
     return comp;
   };
