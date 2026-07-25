@@ -2011,21 +2011,33 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING (2026-07-17, user request): EXACTLY the morph's transition
-     code. The old sigmoid centre-crossover concentrated the whole dissolve
-     into the fast centre swing — a ~0.2s double-exposure flash while the
-     card moved at its fastest, which read as "shaky" — and the user asked
-     for the morph's smoothness on the flip. So the crossfade now sweeps the
-     card's WHOLE tilt range (normalised to the video's real extremes by
-     tiltSweepT): pure A at one end of the rock, pure B at the other, the
-     dissolve progressing gently through the swing and settling during the
-     end dwells. Same smoothstep + 0.15 follow as renderMorph.             */
+     FLIP TIMING (2026-07-25) — NARROW-BAND ANGLE FLIP. Third and current
+     method; the two it replaces were both measured and both rejected:
+       · 2026-07-17 "morph sweep" (smoothstep over the WHOLE tilt range):
+         MEASURED 94% of the rock showing an A+B blend, only 6% clean. Not a
+         flip at all — a permanent double exposure. Marc: "showing both
+         images when it flips" (confirmed on the live site by screenshot).
+       · 2026-07-24 "turnaround snap" (switch only at the parked extremes):
+         0% blend, but the swap lands where the card is STILL, so nothing
+         masks it. Marc: "not smooth, hard transitioning".
+     The fix is to keep the crossfade TILT-DRIVEN (angle-based, like a real
+     lenticular: the image you see is a function of viewing angle) but to
+     confine it to a BAND about the centre of the rock. Outside the band the
+     card holds ONE clean image; inside it the images cross-fade smoothly
+     while the card is moving, so the motion masks the dissolve. BAND is the
+     single tuning knob — smaller = crisper flip / more sudden, larger =
+     smoother / more ghosting. FOLLOW must stay fast enough that `op` tracks
+     the band instead of lagging across it and re-widening the blend.      */
+  const BAND   = 0.30;   /* fraction of the rock spent transitioning */
+  const FOLLOW = 0.30;   /* how quickly op chases the target         */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
-    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
-    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
+    const sw = tiltSweepT(tilt);                    /* 0..1 across the rock */
+    const c  = (sw - (0.5 - BAND / 2)) / BAND;      /* 0..1 across the band */
+    const k  = c < 0 ? 0 : c > 1 ? 1 : c;
+    const lensT = k * k * (3 - 2 * k);              /* smoothstep in-band   */
+    if (!paused) op += (lensT - op) * FOLLOW;       /* smooth follow        */
     const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
     cctx.clearRect(0, 0, CW, CH);
