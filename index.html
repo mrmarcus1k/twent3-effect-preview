@@ -2011,22 +2011,43 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING (2026-07-17, user request): EXACTLY the morph's transition
-     code. The old sigmoid centre-crossover concentrated the whole dissolve
-     into the fast centre swing — a ~0.2s double-exposure flash while the
-     card moved at its fastest, which read as "shaky" — and the user asked
-     for the morph's smoothness on the flip. So the crossfade now sweeps the
-     card's WHOLE tilt range (normalised to the video's real extremes by
-     tiltSweepT): pure A at one end of the rock, pure B at the other, the
-     dissolve progressing gently through the swing and settling during the
-     end dwells. Same smoothstep + 0.15 follow as renderMorph.             */
+     FLIP TIMING — SIGMOID CROSSOVER AT THE CENTRE. Restored 2026-07-25 to
+     the exact code that was LIVE on twent3.co.uk from 2026-07-16 (deploy
+     6373c6e/cbd7614) because that is the transition Marc has always been
+     referring to as correct: "revert back to how it was previously when it
+     transitioned perfectly".
+     ⚠⚠ ROOT CAUSE OF A LONG BACK-AND-FORTH — the 2026-07-24 go-live
+     SILENTLY CHANGED THE FLIP. The deployed site was running this sigmoid,
+     but the local file had the 2026-07-17 rewrite that replaced it with a
+     full-range `tiltSweepT` sweep, so publishing the local file swapped the
+     transition without anyone intending it. Every later "revert" went back
+     to that SWEEP, never to what Marc actually had — which is why the same
+     two complaints kept surviving each revert:
+       · "dissolve transitions LATE" — the sweep spreads the dissolve over
+         the WHOLE rock and only completes at the extremes; the sigmoid
+         completes it at the CENTRE, where the eye expects a lenticular flip.
+       · "GRID LINES in the background" — the sweep leaves the source
+         part-transparent ~88% of the cycle, and perspectiveDraw's
+         deliberately-overlapping triangle clips (0.75px, added to kill AA
+         seams) DOUBLE-BLEND semi-transparent pixels into a visible grid.
+         The sigmoid passes through the blend fast, so alpha is 0 or 1
+         almost always and the seams never show.
+     ⚠ Do NOT "improve" this into a full-range sweep again. Steepness 3.5 and
+     follow 0.22 were themselves a 2026-07-04 smoothness tune (from 7 / 0.5,
+     which snapped too hard). Knobs: steepness (lower = softer/wider dissolve)
+     and the follow rate.                                                   */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
-    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
-    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
-    const a = op < 0 ? 0 : op > 1 ? 1 : op;
+    /* target opacity from tilt — sigmoid crossover at tilt 0 (centre).
+       Steepness 3.5 (was 7) + slower follow 0.22 (was 0.5): user 2026-07-04
+       wanted a visibly smoother flip — the old values snapped A→B too hard. */
+    const lensT = 1 / (1 + Math.exp(-3.5 * tilt)); /* 0 at −tilt, 1 at +tilt */
+    if (!paused) op += (lensT - op) * 0.22;         /* smooth follow */
+    op = op < 0 ? 0 : op > 1 ? 1 : op;
+
+    /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
+    const a = op*op*op * (op*(op*6 - 15) + 10);
 
     cctx.clearRect(0, 0, CW, CH);
     cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
