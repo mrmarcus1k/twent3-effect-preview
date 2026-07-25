@@ -2052,9 +2052,9 @@ function renderFlip(cc) {
   const flipLayers = { layers: [ { canvas: offA, alpha: 0 },
                                  { canvas: offB, alpha: 0 } ] };
 
-  /* frameFn: composite A→B crossfade on a FLAT canvas, return it.
-     The compositor does ONE perspective warp of the result — so there are
-     never two alpha-blended triangle grids overlapping (the old "squares").
+  /* frameFn: returns a LAYER BUNDLE {layers:[{canvas,alpha}×2]}; warpSource()
+     warps each layer opaque and cross-fades the finished warps. (It used to
+     return one pre-blended canvas — that is what caused the dissolve grid.)
 
      🔒 LOCKED 2026-07-25 — Marc: "This is PERFECT". This exact pairing (the
      full-range SWEEP timing below + the ebfd974 two-plain-source-over draw
@@ -2062,10 +2062,10 @@ function renderFlip(cc) {
      back-and-forth to find. DO NOT change either part, and do NOT "improve"
      the blending — see CLAUDE.md "FLIP IS LOCKED" for the table of
      everything already tried and rejected.
-     The one open item is the faint GRID visible during the dissolve; its
-     cause and the two candidate fixes are documented in CLAUDE.md. It is a
-     perspectiveDraw triangle-overlap artefact, NOT a flip-timing problem —
-     do not "fix" it by changing the timing.
+     The dissolve GRID is FIXED too (25be6ad, "everything looks better now"):
+     it was a perspectiveDraw triangle-overlap artefact, NOT a timing problem.
+     This frameFn therefore returns a LAYER BUNDLE, not a flat canvas — see
+     warpSource(). Do not collapse it back into a pre-blended canvas.
 
      FLIP TIMING = THE FULL-RANGE SWEEP (2026-07-17 code), CONFIRMED BY MARC
      2026-07-25 as "the smooth transition" by pointing at his cached build of
