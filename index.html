@@ -2049,9 +2049,14 @@ function renderFlip(cc) {
     /* smootherstep the visible alpha → gentle ease-in / ease-out dissolve */
     const a = op*op*op * (op*(op*6 - 15) + 10);
 
+    /* A fades OUT as B fades in. Drawing A at alpha 1 and only fading B on
+       top assumes B is an opaque rectangle — with CUT-OUT artwork (transparent
+       background) B can never cover A, so image A never disappears. This is
+       the ONLY change from the restored 2026-07-16 code; timing untouched. */
     cctx.clearRect(0, 0, CW, CH);
-    cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
-    if (a > 0.002) { cctx.globalAlpha = a; cctx.drawImage(offB, 0, 0); cctx.globalAlpha = 1; }
+    if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
+    if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
+    cctx.globalAlpha = 1;
     return comp;
   };
 
