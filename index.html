@@ -2011,98 +2011,26 @@ function renderFlip(cc) {
      The compositor does ONE perspective warp of the result — so there are
      never two alpha-blended triangle grids overlapping (the old "squares").
 
-     FLIP TIMING (2026-07-25) — NARROW-BAND ANGLE FLIP. Third and current
-     method; the two it replaces were both measured and both rejected:
-       · 2026-07-17 "morph sweep" (smoothstep over the WHOLE tilt range):
-         MEASURED 94% of the rock showing an A+B blend, only 6% clean. Not a
-         flip at all — a permanent double exposure. Marc: "showing both
-         images when it flips" (confirmed on the live site by screenshot).
-       · 2026-07-24 "turnaround snap" (switch only at the parked extremes):
-         0% blend, but the swap lands where the card is STILL, so nothing
-         masks it. Marc: "not smooth, hard transitioning".
-     The fix is to keep the crossfade TILT-DRIVEN (angle-based, like a real
-     lenticular: the image you see is a function of viewing angle) but to
-     confine it to a BAND about the centre of the rock. Outside the band the
-     card holds ONE clean image; inside it the images cross-fade smoothly
-     while the card is moving, so the motion masks the dissolve. BAND is the
-     single tuning knob — smaller = crisper flip / more sudden, larger =
-     smoother / more ghosting. FOLLOW must stay fast enough that `op` tracks
-     the band instead of lagging across it and re-widening the blend.      */
-  /* BAND 1.0 = the dissolve spans the WHOLE tilt range (2026-07-25, final).
-     History: 0.30 read as a hard cut, 0.58 still "not as smooth as it was".
-     Marc's reference for smoothness is the ORIGINAL 2026-07-17 sweep, which
-     dissolved across the entire range — narrowing the band necessarily makes
-     the alpha change faster (0.58 band ≈ 1.7× the rate), so it can never
-     match that. BAND 1.0 reproduces the original timing EXACTLY (lensT
-     becomes smoothstep(sw) again) while keeping the true cross-dissolve, so
-     image A still fades to nothing instead of sitting under B forever.
-     The card DWELLS ~17 frames at each rock extreme, which is what lets a
-     full-range dissolve still resolve to ONE clean image at the ends —
-     ⚠ SMOOTHNESS vs FULL DISAPPEARANCE pull against each other through
-     FOLLOW: per-frame alpha step ≈ |target−op| × FOLLOW, so a HIGH follow
-     tracks the fast centre swing closely and reads as steppy (0.25 measured
-     0.114/frame on LR — worse than the old narrow band), while a LOW follow
-     is silky but never quite converges (0.15 leaves A at ~4-6% = faint
-     ghost). OVER decouples them: the target is stretched slightly BEYOND
-     0..1, so even a low FOLLOW crosses the ends and the CLAMP pins the drawn
-     alpha at exactly 0 / 1 — silky mid-sweep, guaranteed clean at the ends,
-     plus a genuine hold while it sits clamped.
-     ⚠ TUNED AGAINST THE REAL PER-FRAME TILTS, not evenly-spaced samples.
-     The card dwells at the ends and swings FAST through the centre, so equal
-     tilt steps badly misrepresent the per-frame alpha rate (an earlier pass
-     "measured" smoothness on a linear sweep and drew the wrong conclusion).
-     Replaying tracking_data's real frame sequence and simulating candidates:
-       original 2026-07-17 sweep (F 0.15, no overshoot) → step 0.1275, 88%
-         dissolving, A bottoms out at 0.011 (never fully clears)
-       THIS (F 0.04, OVER 0.48)                        → step 0.0568, 70%
-         dissolving, A reaches EXACTLY 0
-     i.e. 2.2× smoother per frame than the version Marc remembers as smooth,
-     nearly as continuously-dissolving, and it still fully clears image A.
-     Lower FOLLOW is smoother; going to 0.03 leaves A at 0.011 = faint ghost,
-     which is the exact bug we fixed, so 0.04 is the floor.
-     ⚠ OVER 0.48 was NOT enough on UD: that rock DWELLS at the top but only
-     brushes the bottom extreme, so a slow follow never converged there and
-     image A peaked at 0.96 = image B ghosting at 4% (the same defect class,
-     mirrored). OVER 0.70 fixes it — grid-searched F × OVER over the real
-     frame sequences of BOTH videos, 29/30 combinations resolved both ends
-     and this is the smoothest of them.
-     FINAL, measured on the real frames of both videos:
-       LR step 0.0542, UD step 0.0530, A spans exactly 0..1 on both,
-       ~55% of the cycle dissolving (original: step 0.1275, A never cleared).
-     If Marc ever wants it smoother still, LOWER FOLLOW and RAISE OVER
-     together, then re-check that A still spans 0..1 on BOTH orientations —
-     changing FOLLOW alone silently reintroduces the ghost.                 */
-  const BAND   = 1.00;   /* fraction of the rock spent transitioning */
-  const FOLLOW = 0.04;   /* how quickly op chases the target (low = smooth) */
-  const OVER   = 0.70;   /* target overshoot past 0..1 so the clamp lands   */
+     FLIP TIMING (2026-07-17, user request): EXACTLY the morph's transition
+     code. The old sigmoid centre-crossover concentrated the whole dissolve
+     into the fast centre swing — a ~0.2s double-exposure flash while the
+     card moved at its fastest, which read as "shaky" — and the user asked
+     for the morph's smoothness on the flip. So the crossfade now sweeps the
+     card's WHOLE tilt range (normalised to the video's real extremes by
+     tiltSweepT): pure A at one end of the rock, pure B at the other, the
+     dissolve progressing gently through the swing and settling during the
+     end dwells. Same smoothstep + 0.15 follow as renderMorph.             */
   S.frameFn = (now, tilt) => {
     if (imgsReady < 2) return null;
 
-    const sw = tiltSweepT(tilt);                    /* 0..1 across the rock */
-    const c  = (sw - (0.5 - BAND / 2)) / BAND;      /* 0..1 across the band */
-    const k  = c < 0 ? 0 : c > 1 ? 1 : c;
-    const lensT = k * k * (3 - 2 * k);              /* smoothstep in-band   */
-    const target = -OVER + lensT * (1 + 2 * OVER);  /* stretched past 0..1  */
-    if (!paused) op += (target - op) * FOLLOW;      /* smooth follow        */
-    const a = op < 0 ? 0 : op > 1 ? 1 : op;         /* clamp -> true 0 / 1  */
+    const sw    = tiltSweepT(tilt);              /* full-range sweep  */
+    const lensT = sw * sw * (3 - 2 * sw);        /* gentle ends       */
+    if (!paused) op += (lensT - op) * 0.15;      /* smooth follow     */
+    const a = op < 0 ? 0 : op > 1 ? 1 : op;
 
-    /* TRUE CROSS-DISSOLVE — A fades OUT as B fades in (fixed 2026-07-25).
-       The old code drew A at globalAlpha 1 ALWAYS and only faded B in on top.
-       That silently relies on B being a fully opaque rectangle: wherever B is
-       TRANSPARENT (cut-out artwork, logos, PNGs with alpha — very common for
-       lenticular designs) B can never cover A, so image A stayed visible at
-       full strength even at the end of the flip. Marc: "the black Jesus is
-       still showing when the white Jesus is there ... why does black Jesus
-       not disappear when it flips". Reproduced with two transparent-background
-       discs: at full B, the ring where B is transparent still read pure A
-       (255,0,0,255). Fading BOTH layers makes the swap complete for opaque
-       and transparent artwork alike.
-       ⚠ Verify this with images that have TRANSPARENT backgrounds — solid
-       opaque test colours cover each other and hide this class of bug.     */
     cctx.clearRect(0, 0, CW, CH);
-    if (a < 0.998) { cctx.globalAlpha = 1 - a; cctx.drawImage(offA, 0, 0); }
-    if (a > 0.002) { cctx.globalAlpha = a;     cctx.drawImage(offB, 0, 0); }
-    cctx.globalAlpha = 1;
+    cctx.globalAlpha = 1;  cctx.drawImage(offA, 0, 0);
+    if (a > 0.002) { cctx.globalAlpha = a; cctx.drawImage(offB, 0, 0); cctx.globalAlpha = 1; }
     return comp;
   };
 
@@ -3578,13 +3506,9 @@ function renderStereoscopic(cc) {
     const lensT = rawT * rawT * (3 - 2 * rawT);
     if (!paused) _t += (lensT - _t) * 0.2;
     const a = Math.max(0, Math.min(1, _t));
-    /* TRUE cross-dissolve, same fix as renderFlip (2026-07-25): fade the LEFT
-       view out as the right fades in. Drawing L at alpha 1 and only fading R
-       on top leaves L permanently visible wherever R is TRANSPARENT. */
     wctx.clearRect(0, 0, CW, CH);
-    if (a < 0.998) { wctx.globalAlpha = 1 - a; wctx.drawImage(offL, 0, 0); }
-    if (a > 0.002) { wctx.globalAlpha = a;     wctx.drawImage(offR, 0, 0); }
-    wctx.globalAlpha = 1;
+    wctx.globalAlpha = 1;  wctx.drawImage(offL, 0, 0);
+    if (a > 0.002) { wctx.globalAlpha = a; wctx.drawImage(offR, 0, 0); wctx.globalAlpha = 1; }
     return work;
   };
   addCtrl('Pause', '⏸', () => { paused = !paused; }, false);
